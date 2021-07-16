@@ -1,3 +1,9 @@
+astroid (2.1.0-2pexip1) pexip; urgency=medium
+
+  * Prepare Pexip packaging
+
+ -- Huw Jones <huw@pexip.com>  Fri, 16 Jul 2021 09:05:34 +0000
+
 astroid (2.1.0-2) unstable; urgency=medium
 
   * debian/{copyright,control}
