@@ -18,3 +18,12 @@ merged after the Bullseye version of python 3.9
              assert (s2.value.lineno, s2.value.col_offset) == (1, 16)
              assert (s2.value.end_lineno, s2.value.end_col_offset) == (1, 23)
          else:
+@@ -999,7 +1000,7 @@
+         assert (s4.lineno, s4.col_offset) == (2, 0)
+         assert (s4.end_lineno, s4.end_col_offset) == (2, 17)
+         assert isinstance(s4.value, nodes.Name)  # 'name'
+-        if PY39_PLUS:
++        if PY39_PLUS and (sys.version_info.minor == 9 and sys.version_info.micro > 2):
+             assert (s4.value.lineno, s4.value.col_offset) == (2, 10)
+             assert (s4.value.end_lineno, s4.value.end_col_offset) == (2, 14)
+         else:
