@@ -1,7 +1,9 @@
-include ChangeLog
-include README.rst
-include COPYING
-include COPYING.LESSER
-include pytest.ini
-recursive-include astroid/tests *.py *.zip *.egg *.pth
-recursive-include astroid/brain *.py
+prune .github
+prune doc
+prune tests
+exclude .*
+exclude ChangeLog
+exclude pylintrc
+exclude README.rst
+exclude requirements_*.txt
+exclude tox.ini

@@ -1,16 +1,55 @@
 # Copyright (c) 2007, 2009-2010, 2013 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
 # Copyright (c) 2014 Google, Inc.
-# Copyright (c) 2015-2018 Claudiu Popa <pcmanticore@gmail.com>
+# Copyright (c) 2015-2018, 2020 Claudiu Popa <pcmanticore@gmail.com>
 # Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
 # Copyright (c) 2016 Derek Gustafson <degustaf@gmail.com>
 # Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
+# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
+# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
+# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
+# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
+# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
 
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
-# For details: https://github.com/PyCQA/astroid/blob/master/COPYING.LESSER
+# For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
 
 """this module contains exceptions used in the astroid library
 """
+from typing import TYPE_CHECKING
+
 from astroid import util
+
+if TYPE_CHECKING:
+    from astroid import nodes
+
+__all__ = (
+    "AstroidBuildingError",
+    "AstroidBuildingException",
+    "AstroidError",
+    "AstroidImportError",
+    "AstroidIndexError",
+    "AstroidSyntaxError",
+    "AstroidTypeError",
+    "AstroidValueError",
+    "AttributeInferenceError",
+    "BinaryOperationError",
+    "DuplicateBasesError",
+    "InconsistentMroError",
+    "InferenceError",
+    "InferenceOverwriteError",
+    "MroError",
+    "NameInferenceError",
+    "NoDefault",
+    "NotFoundError",
+    "OperationError",
+    "ResolveError",
+    "SuperArgumentTypeError",
+    "SuperError",
+    "TooManyLevelsError",
+    "UnaryOperationError",
+    "UnresolvableName",
+    "UseInferenceDefault",
+)
 
 
 class AstroidError(Exception):
@@ -28,7 +67,7 @@ class AstroidError(Exception):
     """
 
     def __init__(self, message="", **kws):
-        super(AstroidError, self).__init__(message)
+        super().__init__(message)
         self.message = message
         for key, value in kws.items():
             setattr(self, key, value)
@@ -46,7 +85,7 @@ class AstroidBuildingError(AstroidError):
     """
 
     def __init__(self, message="Failed to import module {modname}.", **kws):
-        super(AstroidBuildingError, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 class AstroidImportError(AstroidBuildingError):
@@ -67,9 +106,9 @@ class TooManyLevelsError(AstroidImportError):
     def __init__(
         self,
         message="Relative import with too many levels " "({level}) for module {name!r}",
-        **kws
+        **kws,
     ):
-        super(TooManyLevelsError, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 class AstroidSyntaxError(AstroidBuildingError):
@@ -89,7 +128,7 @@ class NoDefault(AstroidError):
     name = None
 
     def __init__(self, message="{func!r} has no default for {name!r}.", **kws):
-        super(NoDefault, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 class ResolveError(AstroidError):
@@ -117,9 +156,7 @@ class MroError(ResolveError):
     cls = None
 
     def __str__(self):
-        mro_names = ", ".join(
-            "({})".format(", ".join(b.name for b in m)) for m in self.mros
-        )
+        mro_names = ", ".join(f"({', '.join(b.name for b in m)})" for m in self.mros)
         return self.message.format(mros=mro_names, cls=self.cls)
 
 
@@ -157,7 +194,7 @@ class InferenceError(ResolveError):
     context = None
 
     def __init__(self, message="Inference failed for {node!r}.", **kws):
-        super(InferenceError, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 # Why does this inherit from InferenceError rather than ResolveError?
@@ -175,7 +212,7 @@ class NameInferenceError(InferenceError):
     scope = None
 
     def __init__(self, message="{name!r} not found in {scope!r}.", **kws):
-        super(NameInferenceError, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 class AttributeInferenceError(ResolveError):
@@ -191,7 +228,7 @@ class AttributeInferenceError(ResolveError):
     attribute = None
 
     def __init__(self, message="{attribute!r} not found on {target!r}.", **kws):
-        super(AttributeInferenceError, self).__init__(message, **kws)
+        super().__init__(message, **kws)
 
 
 class UseInferenceDefault(Exception):
@@ -212,11 +249,45 @@ class AstroidTypeError(AstroidError):
     """Raised when a TypeError would be expected in Python code."""
 
 
+class AstroidValueError(AstroidError):
+    """Raised when a ValueError would be expected in Python code."""
+
+
 class InferenceOverwriteError(AstroidError):
     """Raised when an inference tip is overwritten
 
     Currently only used for debugging.
     """
+
+
+class ParentMissingError(AstroidError):
+    """Raised when a node which is expected to have a parent attribute is missing one
+
+    Standard attributes:
+        target: The node for which the parent lookup failed.
+    """
+
+    def __init__(self, target: "nodes.NodeNG") -> None:
+        self.target = target
+        super().__init__(message=f"Parent not found on {target!r}.")
+
+
+class StatementMissing(ParentMissingError):
+    """Raised when a call to node.statement() does not return a node. This is because
+    a node in the chain does not have a parent attribute and therefore does not
+    return a node for statement().
+
+    Standard attributes:
+        target: The node for which the parent lookup failed.
+    """
+
+    def __init__(self, target: "nodes.NodeNG") -> None:
+        # pylint: disable-next=bad-super-call
+        # https://github.com/PyCQA/pylint/issues/2903
+        # https://github.com/PyCQA/astroid/pull/1217#discussion_r744149027
+        super(ParentMissingError, self).__init__(
+            message=f"Statement not found on {target!r}"
+        )
 
 
 # Backwards-compatibility aliases

@@ -1,17 +1,25 @@
 # Copyright (c) 2006-2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
 # Copyright (c) 2012 FELD Boris <lothiraldan@gmail.com>
-# Copyright (c) 2014-2018 Claudiu Popa <pcmanticore@gmail.com>
+# Copyright (c) 2014-2020 Claudiu Popa <pcmanticore@gmail.com>
 # Copyright (c) 2014 Google, Inc.
 # Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
 # Copyright (c) 2015 Florian Bruhin <me@the-compiler.org>
 # Copyright (c) 2015 Ovidiu Sabou <ovidiu@sabou.org>
 # Copyright (c) 2016 Derek Gustafson <degustaf@gmail.com>
 # Copyright (c) 2016 Jakub Wilk <jwilk@jwilk.net>
+# Copyright (c) 2018 Ville Skyttä <ville.skytta@iki.fi>
 # Copyright (c) 2018 Nick Drozd <nicholasdrozd@gmail.com>
 # Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
+# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
+# Copyright (c) 2020 Becker Awqatty <bawqatty@mide.com>
+# Copyright (c) 2020 Robin Jarry <robin.jarry@6wind.com>
+# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
+# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
+# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
+# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
 
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
-# For details: https://github.com/PyCQA/astroid/blob/master/COPYING.LESSER
+# For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
 
 """this module contains a set of functions to create astroid trees from scratch
 (build_* functions) or from living object (object_build_* functions)
@@ -19,23 +27,22 @@
 
 import builtins
 import inspect
-import logging
 import os
 import sys
 import types
+import warnings
+from typing import List, Optional
 
-from astroid import bases
-from astroid import manager
-from astroid import node_classes
-from astroid import nodes
+from astroid import bases, nodes
+from astroid.manager import AstroidManager
+from astroid.nodes import node_classes
 
-
-MANAGER = manager.AstroidManager()
 # the keys of CONST_CLS eg python builtin types
-
 _CONSTANTS = tuple(node_classes.CONST_CLS)
 _BUILTINS = vars(builtins)
-_LOG = logging.getLogger(__name__)
+TYPE_NONE = type(None)
+TYPE_NOTIMPLEMENTED = type(NotImplemented)
+TYPE_ELLIPSIS = type(...)
 
 
 def _io_discrepancy(member):
@@ -100,7 +107,7 @@ def attach_import_node(node, modname, membername):
     _attach_local_node(node, from_node, membername)
 
 
-def build_module(name, doc=None):
+def build_module(name: str, doc: Optional[str] = None) -> nodes.Module:
     """create and initialize an astroid Module node"""
     node = nodes.Module(name, doc, pure_python=False)
     node.package = False
@@ -112,31 +119,39 @@ def build_class(name, basenames=(), doc=None):
     """create and initialize an astroid ClassDef node"""
     node = nodes.ClassDef(name, doc)
     for base in basenames:
-        basenode = nodes.Name()
-        basenode.name = base
+        basenode = nodes.Name(name=base)
         node.bases.append(basenode)
         basenode.parent = node
     return node
 
 
-def build_function(name, args=None, defaults=None, doc=None):
+def build_function(
+    name,
+    args: Optional[List[str]] = None,
+    posonlyargs: Optional[List[str]] = None,
+    defaults=None,
+    doc=None,
+    kwonlyargs: Optional[List[str]] = None,
+) -> nodes.FunctionDef:
     """create and initialize an astroid FunctionDef node"""
-    args, defaults = args or [], defaults or []
     # first argument is now a list of decorators
     func = nodes.FunctionDef(name, doc)
-    func.args = argsnode = nodes.Arguments()
-    argsnode.args = []
-    for arg in args:
-        argsnode.args.append(nodes.Name())
-        argsnode.args[-1].name = arg
-        argsnode.args[-1].parent = argsnode
-    argsnode.defaults = []
-    for default in defaults:
+    func.args = argsnode = nodes.Arguments(parent=func)
+    argsnode.postinit(
+        args=[nodes.AssignName(name=arg, parent=argsnode) for arg in args or ()],
+        defaults=[],
+        kwonlyargs=[
+            nodes.AssignName(name=arg, parent=argsnode) for arg in kwonlyargs or ()
+        ],
+        kw_defaults=[],
+        annotations=[],
+        posonlyargs=[
+            nodes.AssignName(name=arg, parent=argsnode) for arg in posonlyargs or ()
+        ],
+    )
+    for default in defaults or ():
         argsnode.defaults.append(nodes.const_factory(default))
         argsnode.defaults[-1].parent = argsnode
-    argsnode.kwarg = None
-    argsnode.vararg = None
-    argsnode.parent = func
     if args:
         register_arguments(func)
     return func
@@ -160,7 +175,7 @@ def register_arguments(func, args=None):
         if func.args.kwarg:
             func.set_local(func.args.kwarg, func.args)
     for arg in args:
-        if isinstance(arg, nodes.Name):
+        if isinstance(arg, nodes.AssignName):
             func.set_local(arg.name, arg)
         else:
             register_arguments(func, arg.elts)
@@ -174,14 +189,30 @@ def object_build_class(node, member, localname):
 
 def object_build_function(node, member, localname):
     """create astroid for a living function object"""
-    # pylint: disable=deprecated-method; completely removed in 2.0
-    args, varargs, varkw, defaults = inspect.getargspec(member)
-    if varargs is not None:
-        args.append(varargs)
-    if varkw is not None:
-        args.append(varkw)
+    signature = inspect.signature(member)
+    args = []
+    defaults = []
+    posonlyargs = []
+    kwonlyargs = []
+    for param_name, param in signature.parameters.items():
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+            posonlyargs.append(param_name)
+        elif param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            args.append(param_name)
+        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+            args.append(param_name)
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            args.append(param_name)
+        elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+            kwonlyargs.append(param_name)
+        if param.default is not inspect._empty:
+            defaults.append(param.default)
     func = build_function(
-        getattr(member, "__name__", None) or localname, args, defaults, member.__doc__
+        getattr(member, "__name__", None) or localname,
+        args,
+        posonlyargs,
+        defaults,
+        member.__doc__,
     )
     node.add_local_node(func, localname)
 
@@ -224,7 +255,7 @@ def _base_class_object_build(node, member, basenames, name=None, localname=None)
             instdict = member().__dict__
         else:
             raise TypeError
-    except:  # pylint: disable=bare-except
+    except TypeError:
         pass
     else:
         for item_name, obj in instdict.items():
@@ -254,6 +285,13 @@ def _build_from_function(node, name, member, module):
         object_build_function(node, member, name)
 
 
+def _safe_has_attribute(obj, member):
+    try:
+        return hasattr(obj, member)
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
 class InspectBuilder:
     """class for building nodes from living object
 
@@ -261,13 +299,17 @@ class InspectBuilder:
     FunctionDef and ClassDef nodes and some others as guessed.
     """
 
-    # astroid from living objects ###############################################
-
-    def __init__(self):
+    def __init__(self, manager_instance=None):
+        self._manager = manager_instance or AstroidManager()
         self._done = {}
         self._module = None
 
-    def inspect_build(self, module, modname=None, path=None):
+    def inspect_build(
+        self,
+        module: types.ModuleType,
+        modname: Optional[str] = None,
+        path: Optional[str] = None,
+    ) -> nodes.Module:
         """build astroid from a living module (i.e. using inspect)
         this is used when there is no python source code available (either
         because it's a built-in module or because the .py is not available)
@@ -282,7 +324,7 @@ class InspectBuilder:
             node = build_module(modname)
         node.file = node.path = os.path.abspath(path) if path else path
         node.name = modname
-        MANAGER.cache_module(node)
+        self._manager.cache_module(node)
         node.package = hasattr(module, "__path__")
         self._done = {}
         self.object_build(node, module)
@@ -290,15 +332,17 @@ class InspectBuilder:
 
     def object_build(self, node, obj):
         """recursive method which create a partial ast from real objects
-         (only function, class, and method are handled)
+        (only function, class, and method are handled)
         """
         if obj in self._done:
             return self._done[obj]
         self._done[obj] = node
         for name in dir(obj):
             try:
-                member = getattr(obj, name)
-            except AttributeError:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("error")
+                    member = getattr(obj, name)
+            except (AttributeError, DeprecationWarning):
                 # damned ExtensionClass.Base, I know you're there !
                 attach_dummy_node(node, name)
                 continue
@@ -337,6 +381,11 @@ class InspectBuilder:
                 # This should be called for Jython, where some builtin
                 # methods aren't caught by isbuiltin branch.
                 _build_from_function(node, name, member, self._module)
+            elif _safe_has_attribute(member, "__all__"):
+                module = build_module(name)
+                _attach_local_node(node, module, name)
+                # recursion
+                self.object_build(module, member)
             else:
                 # create an empty node so that the name is actually defined
                 attach_dummy_node(node, name, member)
@@ -349,13 +398,10 @@ class InspectBuilder:
         # (see http://www.logilab.org/ticket/57299 for instance)
         try:
             modname = getattr(member, "__module__", None)
-        except:  # pylint: disable=bare-except
-            _LOG.exception(
-                "unexpected error while building " "astroid from living object"
-            )
+        except TypeError:
             modname = None
         if modname is None:
-            if name in ("__new__", "__subclasshook__"):
+            if name in {"__new__", "__subclasshook__"}:
                 # Python 2.5.1 (r251:54863, Sep  1 2010, 22:03:14)
                 # >>> print object.__new__.__module__
                 # None
@@ -379,26 +425,32 @@ class InspectBuilder:
         return False
 
 
-### astroid bootstrapping ######################################################
-Astroid_BUILDER = InspectBuilder()
+# astroid bootstrapping ######################################################
 
 _CONST_PROXY = {}
 
 
-def _astroid_bootstrapping(astroid_builtin=None):
-    """astroid boot strapping the builtins module"""
+def _set_proxied(const):
+    # TODO : find a nicer way to handle this situation;
+    return _CONST_PROXY[const.value.__class__]
+
+
+def _astroid_bootstrapping():
+    """astroid bootstrapping the builtins module"""
     # this boot strapping is necessary since we need the Const nodes to
     # inspect_build builtins, and then we can proxy Const
-    if astroid_builtin is None:
-        astroid_builtin = Astroid_BUILDER.inspect_build(builtins)
+    builder = InspectBuilder()
+    astroid_builtin = builder.inspect_build(builtins)
 
-    # pylint: disable=redefined-outer-name
     for cls, node_cls in node_classes.CONST_CLS.items():
-        if cls is type(None):
+        if cls is TYPE_NONE:
             proxy = build_class("NoneType")
             proxy.parent = astroid_builtin
-        elif cls is type(NotImplemented):
+        elif cls is TYPE_NOTIMPLEMENTED:
             proxy = build_class("NotImplementedType")
+            proxy.parent = astroid_builtin
+        elif cls is TYPE_ELLIPSIS:
+            proxy = build_class("Ellipsis")
             proxy.parent = astroid_builtin
         else:
             proxy = astroid_builtin.getattr(cls.__name__)[0]
@@ -407,52 +459,41 @@ def _astroid_bootstrapping(astroid_builtin=None):
         else:
             _CONST_PROXY[cls] = proxy
 
+    # Set the builtin module as parent for some builtins.
+    nodes.Const._proxied = property(_set_proxied)
+
+    _GeneratorType = nodes.ClassDef(
+        types.GeneratorType.__name__, types.GeneratorType.__doc__
+    )
+    _GeneratorType.parent = astroid_builtin
+    bases.Generator._proxied = _GeneratorType
+    builder.object_build(bases.Generator._proxied, types.GeneratorType)
+
+    if hasattr(types, "AsyncGeneratorType"):
+        _AsyncGeneratorType = nodes.ClassDef(
+            types.AsyncGeneratorType.__name__, types.AsyncGeneratorType.__doc__
+        )
+        _AsyncGeneratorType.parent = astroid_builtin
+        bases.AsyncGenerator._proxied = _AsyncGeneratorType
+        builder.object_build(bases.AsyncGenerator._proxied, types.AsyncGeneratorType)
+    builtin_types = (
+        types.GetSetDescriptorType,
+        types.GeneratorType,
+        types.MemberDescriptorType,
+        TYPE_NONE,
+        TYPE_NOTIMPLEMENTED,
+        types.FunctionType,
+        types.MethodType,
+        types.BuiltinFunctionType,
+        types.ModuleType,
+        types.TracebackType,
+    )
+    for _type in builtin_types:
+        if _type.__name__ not in astroid_builtin:
+            cls = nodes.ClassDef(_type.__name__, _type.__doc__)
+            cls.parent = astroid_builtin
+            builder.object_build(cls, _type)
+            astroid_builtin[_type.__name__] = cls
+
 
 _astroid_bootstrapping()
-
-# TODO : find a nicer way to handle this situation;
-def _set_proxied(const):
-    return _CONST_PROXY[const.value.__class__]
-
-
-nodes.Const._proxied = property(_set_proxied)
-
-_GeneratorType = nodes.ClassDef(
-    types.GeneratorType.__name__, types.GeneratorType.__doc__
-)
-_GeneratorType.parent = MANAGER.astroid_cache[builtins.__name__]
-bases.Generator._proxied = _GeneratorType
-Astroid_BUILDER.object_build(bases.Generator._proxied, types.GeneratorType)
-
-if hasattr(types, "AsyncGeneratorType"):
-    # pylint: disable=no-member; AsyncGeneratorType
-    _AsyncGeneratorType = nodes.ClassDef(
-        types.AsyncGeneratorType.__name__, types.AsyncGeneratorType.__doc__
-    )
-    _AsyncGeneratorType.parent = MANAGER.astroid_cache[builtins.__name__]
-    bases.AsyncGenerator._proxied = _AsyncGeneratorType
-    Astroid_BUILDER.object_build(
-        bases.AsyncGenerator._proxied, types.AsyncGeneratorType
-    )
-# pylint: enable=no-member
-
-
-_builtins = MANAGER.astroid_cache[builtins.__name__]
-BUILTIN_TYPES = (
-    types.GetSetDescriptorType,
-    types.GeneratorType,
-    types.MemberDescriptorType,
-    type(None),
-    type(NotImplemented),
-    types.FunctionType,
-    types.MethodType,
-    types.BuiltinFunctionType,
-    types.ModuleType,
-    types.TracebackType,
-)
-for _type in BUILTIN_TYPES:
-    if _type.__name__ not in _builtins:
-        cls = nodes.ClassDef(_type.__name__, _type.__doc__)
-        cls.parent = MANAGER.astroid_cache[builtins.__name__]
-        Astroid_BUILDER.object_build(cls, _type)
-        _builtins[_type.__name__] = cls

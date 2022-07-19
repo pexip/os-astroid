@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2014-2018 Claudiu Popa <pcmanticore@gmail.com>
+# Copyright (c) 2014-2018, 2020 Claudiu Popa <pcmanticore@gmail.com>
 # Copyright (c) 2014 Google, Inc.
 # Copyright (c) 2014 Denis Laxalde <denis.laxalde@logilab.fr>
 # Copyright (c) 2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
@@ -9,12 +8,24 @@
 # Copyright (c) 2016 Derek Gustafson <degustaf@gmail.com>
 # Copyright (c) 2016 Jakub Wilk <jwilk@jwilk.net>
 # Copyright (c) 2016 Ceridwen <ceridwenv@gmail.com>
+# Copyright (c) 2018 Ville Skyttä <ville.skytta@iki.fi>
 # Copyright (c) 2018 Mario Corchero <mcorcherojim@bloomberg.net>
 # Copyright (c) 2018 Mario Corchero <mariocj89@gmail.com>
 # Copyright (c) 2018 Anthony Sottile <asottile@umich.edu>
+# Copyright (c) 2019 Hugo van Kemenade <hugovk@users.noreply.github.com>
+# Copyright (c) 2019 markmcclain <markmcclain@users.noreply.github.com>
+# Copyright (c) 2019 BasPH <BasPH@users.noreply.github.com>
+# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
+# Copyright (c) 2020 Peter Kolbus <peter.kolbus@gmail.com>
+# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
+# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
+# Copyright (c) 2021 Keichi Takahashi <hello@keichi.dev>
+# Copyright (c) 2021 Nick Drozd <nicholasdrozd@gmail.com>
+# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
+# Copyright (c) 2021 DudeNr33 <3929834+DudeNr33@users.noreply.github.com>
 
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
-# For details: https://github.com/PyCQA/astroid/blob/master/COPYING.LESSER
+# For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
 
 """Python modules manipulation utility functions.
 
@@ -27,22 +38,28 @@
 :type BUILTIN_MODULES: dict
 :var BUILTIN_MODULES: dictionary with builtin module names has key
 """
-import imp
+
+# We disable the import-error so pylint can work without distutils installed.
+# pylint: disable=no-name-in-module,useless-suppression
+
+import importlib
+import importlib.machinery
+import importlib.util
+import itertools
 import os
 import platform
 import sys
-import itertools
+import types
+from distutils.errors import DistutilsPlatformError  # pylint: disable=import-error
 from distutils.sysconfig import get_python_lib  # pylint: disable=import-error
+from typing import Dict, Set
 
-# pylint: disable=import-error, no-name-in-module
-from distutils.errors import DistutilsPlatformError
+from astroid.interpreter._import import spec, util
 
 # distutils is replaced by virtualenv with a module that does
 # weird path manipulations in order to get to the
 # real distutils module.
 
-from .interpreter._import import spec
-from .interpreter._import import util
 
 if sys.platform.startswith("win"):
     PY_SOURCE_EXTS = ("py", "pyw")
@@ -74,7 +91,9 @@ if os.name == "nt":
     try:
         # real_prefix is defined when running inside virtual environments,
         # created with the **virtualenv** library.
-        STD_LIB_DIRS.add(os.path.join(sys.real_prefix, "dlls"))
+        # Deprecated in virtualenv==16.7.9
+        # See: https://github.com/pypa/virtualenv/issues/1622
+        STD_LIB_DIRS.add(os.path.join(sys.real_prefix, "dlls"))  # type: ignore[attr-defined]
     except AttributeError:
         # sys.base_exec_prefix is always defined, but in a virtual environment
         # created with the stdlib **venv** module, it points to the original
@@ -85,19 +104,33 @@ if os.name == "nt":
             pass
 
 if platform.python_implementation() == "PyPy":
+    # The get_python_lib(standard_lib=True) function does not give valid
+    # result with pypy in a virtualenv.
+    # In a virtual environment, with CPython implementation the call to this function returns a path toward
+    # the binary (its libraries) which has been used to create the virtual environment.
+    # Not with pypy implementation.
+    # The only way to retrieve such information is to use the sys.base_prefix hint.
+    # It's worth noticing that under CPython implementation the return values of
+    # get_python_lib(standard_lib=True) and get_python_lib(santdard_lib=True, prefix=sys.base_prefix)
+    # are the same.
+    # In the lines above, we could have replace the call to get_python_lib(standard=True)
+    # with the one using prefix=sys.base_prefix but we prefer modifying only what deals with pypy.
+    STD_LIB_DIRS.add(get_python_lib(standard_lib=True, prefix=sys.base_prefix))
     _root = os.path.join(sys.prefix, "lib_pypy")
     STD_LIB_DIRS.add(_root)
     try:
         # real_prefix is defined when running inside virtualenv.
-        STD_LIB_DIRS.add(os.path.join(sys.real_prefix, "lib_pypy"))
+        STD_LIB_DIRS.add(os.path.join(sys.base_prefix, "lib_pypy"))
     except AttributeError:
         pass
     del _root
 if os.name == "posix":
-    # Need the real prefix is we're under a virtualenv, otherwise
+    # Need the real prefix if we're in a virtualenv, otherwise
     # the usual one will do.
+    # Deprecated in virtualenv==16.7.9
+    # See: https://github.com/pypa/virtualenv/issues/1622
     try:
-        prefix = sys.real_prefix
+        prefix = sys.real_prefix  # type: ignore[attr-defined]
     except AttributeError:
         prefix = sys.prefix
 
@@ -116,7 +149,7 @@ if os.name == "posix":
         # https://github.com/PyCQA/pylint/issues/712#issuecomment-163178753
         STD_LIB_DIRS.add(_posix_path("lib64"))
 
-EXT_LIB_DIR = get_python_lib()
+EXT_LIB_DIRS = {get_python_lib(), get_python_lib(True)}
 IS_JYTHON = platform.python_implementation() == "Jython"
 BUILTIN_MODULES = dict.fromkeys(sys.builtin_module_names, True)
 
@@ -127,20 +160,19 @@ class NoSourceFile(Exception):
     """
 
 
-def _normalize_path(path):
-    return os.path.normcase(os.path.abspath(path))
+def _normalize_path(path: str) -> str:
+    """Resolve symlinks in path and convert to absolute path.
 
+    Note that environment variables and ~ in the path need to be expanded in
+    advance.
 
-def _canonicalize_path(path):
-    return os.path.realpath(os.path.expanduser(path))
+    This can be cached by using _cache_normalize_path.
+    """
+    return os.path.normcase(os.path.realpath(path))
 
 
 def _path_from_filename(filename, is_jython=IS_JYTHON):
     if not is_jython:
-        if sys.version_info > (3, 0):
-            return filename
-        if filename.endswith(".pyc"):
-            return filename[:-1]
         return filename
     head, has_pyclass, _ = filename.partition("$py.class")
     if has_pyclass:
@@ -160,11 +192,11 @@ def _handle_blacklist(blacklist, dirnames, filenames):
             filenames.remove(norecurs)
 
 
-_NORM_PATH_CACHE = {}
+_NORM_PATH_CACHE: Dict[str, str] = {}
 
 
-def _cache_normalize_path(path):
-    """abspath with caching"""
+def _cache_normalize_path(path: str) -> str:
+    """Normalize path with caching."""
     # _module_file calls abspath on every path in sys.path every time it's
     # called; on a larger codebase this easily adds up to half a second just
     # assembling path components. This cache alleviates that.
@@ -177,111 +209,53 @@ def _cache_normalize_path(path):
         return result
 
 
-def load_module_from_name(dotted_name, path=None, use_sys=True):
+def load_module_from_name(dotted_name: str) -> types.ModuleType:
     """Load a Python module from its name.
 
     :type dotted_name: str
     :param dotted_name: python name of a module or package
-
-    :type path: list or None
-    :param path:
-      optional list of path where the module or package should be
-      searched (use sys.path if nothing or None is given)
-
-    :type use_sys: bool
-    :param use_sys:
-      boolean indicating whether the sys.modules dictionary should be
-      used or not
-
 
     :raise ImportError: if the module or package is not found
 
     :rtype: module
     :return: the loaded module
     """
-    return load_module_from_modpath(dotted_name.split("."), path, use_sys)
+    try:
+        return sys.modules[dotted_name]
+    except KeyError:
+        pass
+
+    return importlib.import_module(dotted_name)
 
 
-def load_module_from_modpath(parts, path=None, use_sys=1):
+def load_module_from_modpath(parts):
     """Load a python module from its split name.
 
     :type parts: list(str) or tuple(str)
     :param parts:
       python name of a module or package split on '.'
 
-    :type path: list or None
-    :param path:
-      optional list of path where the module or package should be
-      searched (use sys.path if nothing or None is given)
-
-    :type use_sys: bool
-    :param use_sys:
-      boolean indicating whether the sys.modules dictionary should be used or not
-
     :raise ImportError: if the module or package is not found
 
     :rtype: module
     :return: the loaded module
     """
-    if use_sys:
-        try:
-            return sys.modules[".".join(parts)]
-        except KeyError:
-            pass
-    modpath = []
-    prevmodule = None
-    for part in parts:
-        modpath.append(part)
-        curname = ".".join(modpath)
-        module = None
-        if len(modpath) != len(parts):
-            # even with use_sys=False, should try to get outer packages from sys.modules
-            module = sys.modules.get(curname)
-        elif use_sys:
-            # because it may have been indirectly loaded through a parent
-            module = sys.modules.get(curname)
-        if module is None:
-            mp_file, mp_filename, mp_desc = imp.find_module(part, path)
-            module = imp.load_module(curname, mp_file, mp_filename, mp_desc)
-            # mp_file still needs to be closed.
-            if mp_file:
-                mp_file.close()
-        if prevmodule:
-            setattr(prevmodule, part, module)
-        _file = getattr(module, "__file__", "")
-        prevmodule = module
-        if not _file and util.is_namespace(curname):
-            continue
-        if not _file and len(modpath) != len(parts):
-            raise ImportError("no module in %s" % ".".join(parts[len(modpath) :]))
-        path = [os.path.dirname(_file)]
-    return module
+    return load_module_from_name(".".join(parts))
 
 
-def load_module_from_file(filepath, path=None, use_sys=True, extrapath=None):
+def load_module_from_file(filepath: str):
     """Load a Python module from it's path.
 
     :type filepath: str
     :param filepath: path to the python module or package
 
-    :type path: list or None
-    :param path:
-      optional list of path where the module or package should be
-      searched (use sys.path if nothing or None is given)
-
-    :type use_sys: bool
-    :param use_sys:
-      boolean indicating whether the sys.modules dictionary should be
-      used or not
-
-
     :raise ImportError: if the module or package is not found
 
     :rtype: module
     :return: the loaded module
     """
-    modpath = modpath_from_file(filepath, extrapath)
-    return load_module_from_modpath(modpath, path, use_sys)
+    modpath = modpath_from_file(filepath)
+    return load_module_from_modpath(modpath)
 
 
 def check_modpath_has_init(path, mod_path):
@@ -323,6 +297,9 @@ def _get_relative_base_path(filename, path_to_check):
     if os.path.normcase(real_filename).startswith(path_to_check):
         importable_path = real_filename
 
+    # if "var" in path_to_check:
+    #     breakpoint()
+
     if importable_path:
         base_path = os.path.splitext(importable_path)[0]
         relative_base_path = base_path[len(path_to_check) :]
@@ -331,48 +308,38 @@ def _get_relative_base_path(filename, path_to_check):
     return None
 
 
-def modpath_from_file_with_callback(filename, extrapath=None, is_package_cb=None):
+def modpath_from_file_with_callback(filename, path=None, is_package_cb=None):
     filename = os.path.expanduser(_path_from_filename(filename))
-
-    if extrapath is not None:
-        for path_ in itertools.chain(map(_canonicalize_path, extrapath), extrapath):
-            path = os.path.abspath(path_)
-            if not path:
-                continue
-            submodpath = _get_relative_base_path(filename, path)
-            if not submodpath:
-                continue
-            if is_package_cb(path, submodpath[:-1]):
-                return extrapath[path_].split(".") + submodpath
-
-    for path in itertools.chain(map(_canonicalize_path, sys.path), sys.path):
-        path = _cache_normalize_path(path)
-        if not path:
+    paths_to_check = sys.path.copy()
+    if path:
+        paths_to_check += path
+    for pathname in itertools.chain(
+        paths_to_check, map(_cache_normalize_path, paths_to_check)
+    ):
+        if not pathname:
             continue
-        modpath = _get_relative_base_path(filename, path)
+        modpath = _get_relative_base_path(filename, pathname)
         if not modpath:
             continue
-        if is_package_cb(path, modpath[:-1]):
+        if is_package_cb(pathname, modpath[:-1]):
             return modpath
 
     raise ImportError(
-        "Unable to find module for %s in %s" % (filename, ", \n".join(sys.path))
+        "Unable to find module for {} in {}".format(filename, ", \n".join(sys.path))
     )
 
 
-def modpath_from_file(filename, extrapath=None):
-    """given a file path return the corresponding split module's name
-    (i.e name of a module or package split on '.')
+def modpath_from_file(filename, path=None):
+    """Get the corresponding split module's name from a filename
+
+    This function will return the name of a module or package split on `.`.
 
     :type filename: str
     :param filename: file's path for which we want the module's name
 
-    :type extrapath: dict
-    :param extrapath:
-      optional extra search path, with path as key and package name for the path
-      as value. This is usually useful to handle package split in multiple
-      directories using __path__ trick.
-
+    :type Optional[List[str]] path:
+      Optional list of path where the module or package should be
+      searched (use sys.path if nothing or None is given)
 
     :raise ImportError:
       if the corresponding module's name has not been found
@@ -380,7 +347,7 @@ def modpath_from_file(filename, extrapath=None):
     :rtype: list(str)
     :return: the corresponding split module's name
     """
-    return modpath_from_file_with_callback(filename, extrapath, check_modpath_has_init)
+    return modpath_from_file_with_callback(filename, path, check_modpath_has_init)
 
 
 def file_from_modpath(modpath, path=None, context_file=None):
@@ -430,7 +397,9 @@ def file_info_from_modpath(modpath, path=None, context_file=None):
     elif modpath == ["os", "path"]:
         # FIXME: currently ignoring search_path...
         return spec.ModuleSpec(
-            name="os.path", location=os.path.__file__, module_type=imp.PY_SOURCE
+            name="os.path",
+            location=os.path.__file__,
+            module_type=spec.ModuleType.PY_SOURCE,
         )
     return _spec_from_modpath(modpath, path, context)
 
@@ -550,7 +519,7 @@ def get_source_file(filename, include_no_ext=False):
     filename = os.path.abspath(_path_from_filename(filename))
     base, orig_ext = os.path.splitext(filename)
     for ext in PY_SOURCE_EXTS:
-        source_path = "%s.%s" % (base, ext)
+        source_path = f"{base}.{ext}"
         if os.path.exists(source_path):
             return source_path
     if include_no_ext and not orig_ext and os.path.exists(base):
@@ -596,14 +565,13 @@ def is_standard_module(modname, std_path=None):
         # we assume there are no namespaces in stdlib
         return not util.is_namespace(modname)
     filename = _normalize_path(filename)
-    if filename.startswith(_cache_normalize_path(EXT_LIB_DIR)):
-        return False
+    for path in EXT_LIB_DIRS:
+        if filename.startswith(_cache_normalize_path(path)):
+            return False
     if std_path is None:
         std_path = STD_LIB_DIRS
-    for path in std_path:
-        if filename.startswith(_cache_normalize_path(path)):
-            return True
-    return False
+
+    return any(filename.startswith(_cache_normalize_path(path)) for path in std_path)
 
 
 def is_relative(modname, from_file):
@@ -625,15 +593,11 @@ def is_relative(modname, from_file):
         from_file = os.path.dirname(from_file)
     if from_file in sys.path:
         return False
-    try:
-        stream, _, _ = imp.find_module(modname.split(".")[0], [from_file])
-
-        # Close the stream to avoid ResourceWarnings.
-        if stream:
-            stream.close()
-        return True
-    except ImportError:
-        return False
+    return bool(
+        importlib.machinery.PathFinder.find_spec(
+            modname.split(".", maxsplit=1)[0], [from_file]
+        )
+    )
 
 
 # internal only functions #####################################################
@@ -679,10 +643,7 @@ def _is_python_file(filename):
 
     .pyc and .pyo are ignored
     """
-    for ext in (".py", ".so", ".pyd", ".pyw"):
-        if filename.endswith(ext):
-            return True
-    return False
+    return filename.endswith((".py", ".so", ".pyd", ".pyw"))
 
 
 def _has_init(directory):
@@ -702,3 +663,18 @@ def is_namespace(specobj):
 
 def is_directory(specobj):
     return specobj.type == spec.ModuleType.PKG_DIRECTORY
+
+
+def is_module_name_part_of_extension_package_whitelist(
+    module_name: str, package_whitelist: Set[str]
+) -> bool:
+    """
+    Returns True if one part of the module name is in the package whitelist
+
+    >>> is_module_name_part_of_extension_package_whitelist('numpy.core.umath', {'numpy'})
+    True
+    """
+    parts = module_name.split(".")
+    return any(
+        ".".join(parts[:x]) in package_whitelist for x in range(1, len(parts) + 1)
+    )
