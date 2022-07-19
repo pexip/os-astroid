@@ -9,7 +9,7 @@ Standards-Version: 4.3.0
 Homepage: https://github.com/PyCQA/astroid
 Vcs-Git: https://salsa.debian.org/python-team/modules/astroid.git
 Vcs-Browser: https://salsa.debian.org/python-team/modules/astroid
-XS-Pexip-Upstream: http://ftp.debian.org/debian/ buster
+XS-Pexip-Upstream: http://ftp.debian.org/debian/ bookworm
 
 Package: python3-astroid
 Architecture: all
