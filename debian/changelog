@@ -1,3 +1,9 @@
+astroid (2.9.3-1pexip1) pexip-bullseye; urgency=medium
+
+  * Backport bookworm version to Pexos.
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Tue, 19 Jul 2022 20:06:44 +0100
+
 astroid (2.9.3-1) unstable; urgency=medium
 
   * New upstream release
