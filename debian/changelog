@@ -1,3 +1,9 @@
+astroid (2.9.3-1pexip2) pexip-bullseye; urgency=medium
+
+  * Bullseye rebuild for ARM64 inclusion
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Mon, 05 Sep 2022 10:31:08 +0100
+
 astroid (2.9.3-1pexip1) pexip-bullseye; urgency=medium
 
   * Backport bookworm version to Pexos.
