@@ -1,11 +1,15 @@
-"""Tests for function call inference"""
+# Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
+# For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
+
+"""Tests for function call inference."""
 
 from astroid import bases, builder, nodes
 from astroid.util import Uninferable
 
 
 def test_no_return() -> None:
-    """Test function with no return statements"""
+    """Test function with no return statements."""
     node = builder.extract_node(
         """
     def f():
@@ -21,7 +25,7 @@ def test_no_return() -> None:
 
 
 def test_one_return() -> None:
-    """Test function with a single return that always executes"""
+    """Test function with a single return that always executes."""
     node = builder.extract_node(
         """
     def f():
@@ -38,7 +42,7 @@ def test_one_return() -> None:
 
 
 def test_one_return_possible() -> None:
-    """Test function with a single return that only sometimes executes
+    """Test function with a single return that only sometimes executes.
 
     Note: currently, inference doesn't handle this type of control flow
     """
@@ -59,7 +63,7 @@ def test_one_return_possible() -> None:
 
 
 def test_multiple_returns() -> None:
-    """Test function with multiple returns"""
+    """Test function with multiple returns."""
     node = builder.extract_node(
         """
     def f(x):
@@ -81,7 +85,7 @@ def test_multiple_returns() -> None:
 
 
 def test_argument() -> None:
-    """Test function whose return value uses its arguments"""
+    """Test function whose return value uses its arguments."""
     node = builder.extract_node(
         """
     def f(x, y):
@@ -98,7 +102,7 @@ def test_argument() -> None:
 
 
 def test_inner_call() -> None:
-    """Test function where return value is the result of a separate function call"""
+    """Test function where return value is the result of a separate function call."""
     node = builder.extract_node(
         """
     def f():
@@ -518,8 +522,8 @@ def test_instance_method_inherited() -> None:
     A.method(B())  #@
     """
     )
-    expected = ["A", "A", "B", "B", "B"]
-    for node, expected in zip(nodes_, expected):
+    expected_names = ["A", "A", "B", "B", "B"]
+    for node, expected in zip(nodes_, expected_names):
         assert isinstance(node, nodes.NodeNG)
         inferred = node.inferred()
         assert len(inferred) == 1
@@ -549,8 +553,8 @@ def test_class_method_inherited() -> None:
     B.method()  #@
     """
     )
-    expected = ["A", "A", "B", "B"]
-    for node, expected in zip(nodes_, expected):
+    expected_names = ["A", "A", "B", "B"]
+    for node, expected in zip(nodes_, expected_names):
         assert isinstance(node, nodes.NodeNG)
         inferred = node.inferred()
         assert len(inferred) == 1

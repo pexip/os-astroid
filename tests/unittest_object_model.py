@@ -1,16 +1,6 @@
-# Copyright (c) 2016-2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2016 Derek Gustafson <degustaf@gmail.com>
-# Copyright (c) 2017 Łukasz Rogalski <rogalski.91@gmail.com>
-# Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Keichi Takahashi <keichi.t@me.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
-# Copyright (c) 2021 hippo91 <guillaume.peillex@gmail.com>
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
 import unittest
 import xml
@@ -18,7 +8,8 @@ import xml
 import pytest
 
 import astroid
-from astroid import builder, nodes, objects, test_utils, util
+from astroid import bases, builder, nodes, objects, test_utils, util
+from astroid.const import PY311_PLUS
 from astroid.exceptions import InferenceError
 
 try:
@@ -212,9 +203,9 @@ class ClassModelTest(unittest.TestCase):
         called_mro = next(ast_nodes[5].infer())
         self.assertEqual(called_mro.elts, mro.elts)
 
-        bases = next(ast_nodes[6].infer())
-        self.assertIsInstance(bases, astroid.Tuple)
-        self.assertEqual([cls.name for cls in bases.elts], ["object"])
+        base_nodes = next(ast_nodes[6].infer())
+        self.assertIsInstance(base_nodes, astroid.Tuple)
+        self.assertEqual([cls.name for cls in base_nodes.elts], ["object"])
 
         cls = next(ast_nodes[7].infer())
         self.assertIsInstance(cls, astroid.ClassDef)
@@ -262,6 +253,27 @@ class ModuleModelTest(unittest.TestCase):
         xml.__cached__ #@
         xml.__package__ #@
         xml.__dict__ #@
+        xml.__init__ #@
+        xml.__new__ #@
+
+        xml.__subclasshook__ #@
+        xml.__str__ #@
+        xml.__sizeof__ #@
+        xml.__repr__ #@
+        xml.__reduce__ #@
+
+        xml.__setattr__ #@
+        xml.__reduce_ex__ #@
+        xml.__lt__ #@
+        xml.__eq__ #@
+        xml.__gt__ #@
+        xml.__format__ #@
+        xml.__delattr___ #@
+        xml.__getattribute__ #@
+        xml.__hash__ #@
+        xml.__dir__ #@
+        xml.__call__ #@
+        xml.__closure__ #@
         """
         )
         assert isinstance(ast_nodes, list)
@@ -292,6 +304,21 @@ class ModuleModelTest(unittest.TestCase):
 
         dict_ = next(ast_nodes[8].infer())
         self.assertIsInstance(dict_, astroid.Dict)
+
+        init_ = next(ast_nodes[9].infer())
+        assert isinstance(init_, bases.BoundMethod)
+        init_result = next(init_.infer_call_result(nodes.Call()))
+        assert isinstance(init_result, nodes.Const)
+        assert init_result.value is None
+
+        new_ = next(ast_nodes[10].infer())
+        assert isinstance(new_, bases.BoundMethod)
+
+        # The following nodes are just here for theoretical completeness,
+        # and they either return Uninferable or raise InferenceError.
+        for ast_node in ast_nodes[11:28]:
+            with pytest.raises(InferenceError):
+                next(ast_node.infer())
 
 
 class FunctionModelTest(unittest.TestCase):
@@ -367,8 +394,7 @@ class FunctionModelTest(unittest.TestCase):
                 next(node.infer())
 
     def test_descriptor_error_regression(self) -> None:
-        """Make sure the following code does
-        node cause an exception"""
+        """Make sure the following code does node cause an exception."""
         node = builder.extract_node(
             """
         class MyClass:
@@ -403,6 +429,27 @@ class FunctionModelTest(unittest.TestCase):
         func.__globals__ #@
         func.__code__ #@
         func.__closure__ #@
+        func.__init__ #@
+        func.__new__ #@
+
+        func.__subclasshook__ #@
+        func.__str__ #@
+        func.__sizeof__ #@
+        func.__repr__ #@
+        func.__reduce__ #@
+
+        func.__reduce_ex__ #@
+        func.__lt__ #@
+        func.__eq__ #@
+        func.__gt__ #@
+        func.__format__ #@
+        func.__delattr___ #@
+        func.__getattribute__ #@
+        func.__hash__ #@
+        func.__dir__ #@
+        func.__class__ #@
+
+        func.__setattr__ #@
         ''',
             module_name="fake_module",
         )
@@ -435,6 +482,25 @@ class FunctionModelTest(unittest.TestCase):
 
         for ast_node in ast_nodes[7:9]:
             self.assertIs(next(ast_node.infer()), astroid.Uninferable)
+
+        init_ = next(ast_nodes[9].infer())
+        assert isinstance(init_, bases.BoundMethod)
+        init_result = next(init_.infer_call_result(nodes.Call()))
+        assert isinstance(init_result, nodes.Const)
+        assert init_result.value is None
+
+        new_ = next(ast_nodes[10].infer())
+        assert isinstance(new_, bases.BoundMethod)
+
+        # The following nodes are just here for theoretical completeness,
+        # and they either return Uninferable or raise InferenceError.
+        for ast_node in ast_nodes[11:26]:
+            inferred = next(ast_node.infer())
+            assert inferred is util.Uninferable
+
+        for ast_node in ast_nodes[26:27]:
+            with pytest.raises(InferenceError):
+                inferred = next(ast_node.infer())
 
     def test_empty_return_annotation(self) -> None:
         ast_node = builder.extract_node(
@@ -504,6 +570,45 @@ class FunctionModelTest(unittest.TestCase):
         self.assertEqual(annotations.getitem(astroid.Const("c")).value, 3)
 
 
+class TestContextManagerModel:
+    def test_model(self) -> None:
+        """We use a generator to test this model."""
+        ast_nodes = builder.extract_node(
+            """
+        def test():
+           "a"
+           yield
+
+        gen = test()
+        gen.__enter__ #@
+        gen.__exit__ #@
+        """
+        )
+        assert isinstance(ast_nodes, list)
+
+        enter = next(ast_nodes[0].infer())
+        assert isinstance(enter, astroid.BoundMethod)
+        # Test that the method is correctly bound
+        assert isinstance(enter.bound, bases.Generator)
+        assert enter.bound._proxied.qname() == "builtins.generator"
+        # Test that thet FunctionDef accepts no arguments except self
+        # NOTE: This probably shouldn't be double proxied, but this is a
+        # quirck of the current model implementations.
+        assert isinstance(enter._proxied._proxied, nodes.FunctionDef)
+        assert len(enter._proxied._proxied.args.args) == 1
+        assert enter._proxied._proxied.args.args[0].name == "self"
+
+        exit_node = next(ast_nodes[1].infer())
+        assert isinstance(exit_node, astroid.BoundMethod)
+        # Test that the FunctionDef accepts the arguments as defiend in the ObjectModel
+        assert isinstance(exit_node._proxied._proxied, nodes.FunctionDef)
+        assert len(exit_node._proxied._proxied.args.args) == 4
+        assert exit_node._proxied._proxied.args.args[0].name == "self"
+        assert exit_node._proxied._proxied.args.args[1].name == "exc_type"
+        assert exit_node._proxied._proxied.args.args[2].name == "exc_value"
+        assert exit_node._proxied._proxied.args.args[3].name == "traceback"
+
+
 class GeneratorModelTest(unittest.TestCase):
     def test_model(self) -> None:
         ast_nodes = builder.extract_node(
@@ -518,6 +623,8 @@ class GeneratorModelTest(unittest.TestCase):
         gen.gi_code #@
         gen.gi_frame #@
         gen.send #@
+        gen.__enter__ #@
+        gen.__exit__ #@
         """
         )
         assert isinstance(ast_nodes, list)
@@ -538,9 +645,16 @@ class GeneratorModelTest(unittest.TestCase):
         send = next(ast_nodes[4].infer())
         self.assertIsInstance(send, astroid.BoundMethod)
 
+        enter = next(ast_nodes[5].infer())
+        assert isinstance(enter, astroid.BoundMethod)
+
+        exit_node = next(ast_nodes[6].infer())
+        assert isinstance(exit_node, astroid.BoundMethod)
+
 
 class ExceptionModelTest(unittest.TestCase):
-    def test_valueerror_py3(self) -> None:
+    @staticmethod
+    def test_valueerror_py3() -> None:
         ast_nodes = builder.extract_node(
             """
         try:
@@ -554,12 +668,21 @@ class ExceptionModelTest(unittest.TestCase):
         )
         assert isinstance(ast_nodes, list)
         args = next(ast_nodes[0].infer())
-        self.assertIsInstance(args, astroid.Tuple)
+        assert isinstance(args, astroid.Tuple)
         tb = next(ast_nodes[1].infer())
-        self.assertIsInstance(tb, astroid.Instance)
-        self.assertEqual(tb.name, "traceback")
+        # Python 3.11: If 'contextlib' is loaded, '__traceback__'
+        # could be set inside '__exit__' method in
+        # which case 'err.__traceback__' will be 'Uninferable'
+        try:
+            assert isinstance(tb, astroid.Instance)
+            assert tb.name == "traceback"
+        except AssertionError:
+            if PY311_PLUS:
+                assert tb == util.Uninferable
+            else:
+                raise
 
-        with self.assertRaises(InferenceError):
+        with pytest.raises(InferenceError):
             next(ast_nodes[2].infer())
 
     def test_syntax_error(self) -> None:
@@ -669,6 +792,21 @@ class DictObjectModelTest(unittest.TestCase):
         self.assertEqual([elt.value for elt in keys.elts], [1, 2])
         items = next(ast_nodes[2].infer())
         self.assertIsInstance(items, objects.DictItems)
+
+
+class TestExceptionInstanceModel:
+    """Tests for ExceptionInstanceModel."""
+
+    def test_str_argument_not_required(self) -> None:
+        """Test that the first argument to an exception does not need to be a str."""
+        ast_node = builder.extract_node(
+            """
+        BaseException() #@
+        """
+        )
+        args: nodes.Tuple = next(ast_node.infer()).getattr("args")[0]
+        # BaseException doesn't have any required args, not even a string
+        assert not args.elts
 
 
 class LruCacheModelTest(unittest.TestCase):

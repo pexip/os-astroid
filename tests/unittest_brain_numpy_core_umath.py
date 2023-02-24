@@ -1,13 +1,7 @@
-# Copyright (c) 2019-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
+
 import unittest
 
 try:
@@ -22,9 +16,7 @@ from astroid import bases, builder, nodes
 
 @unittest.skipUnless(HAS_NUMPY, "This test requires the numpy library.")
 class NumpyBrainCoreUmathTest(unittest.TestCase):
-    """
-    Test of all members of numpy.core.umath module
-    """
+    """Test of all members of numpy.core.umath module."""
 
     one_arg_ufunc = (
         "arccos",
@@ -118,18 +110,14 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
         return next(node.infer())
 
     def test_numpy_core_umath_constants(self):
-        """
-        Test that constants have Const type.
-        """
+        """Test that constants have Const type."""
         for const in self.constants:
             with self.subTest(const=const):
                 inferred = self._inferred_numpy_attribute(const)
                 self.assertIsInstance(inferred, nodes.Const)
 
     def test_numpy_core_umath_constants_values(self):
-        """
-        Test the values of the constants.
-        """
+        """Test the values of the constants."""
         exact_values = {"e": 2.718281828459045, "euler_gamma": 0.5772156649015329}
         for const in self.constants:
             with self.subTest(const=const):
@@ -137,18 +125,14 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
                 self.assertEqual(inferred.value, exact_values[const])
 
     def test_numpy_core_umath_functions(self):
-        """
-        Test that functions have FunctionDef type.
-        """
+        """Test that functions have FunctionDef type."""
         for func in self.all_ufunc:
             with self.subTest(func=func):
                 inferred = self._inferred_numpy_attribute(func)
                 self.assertIsInstance(inferred, bases.Instance)
 
     def test_numpy_core_umath_functions_one_arg(self):
-        """
-        Test the arguments names of functions.
-        """
+        """Test the arguments names of functions."""
         exact_arg_names = [
             "self",
             "x",
@@ -167,9 +151,7 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
                 )
 
     def test_numpy_core_umath_functions_two_args(self):
-        """
-        Test the arguments names of functions.
-        """
+        """Test the arguments names of functions."""
         exact_arg_names = [
             "self",
             "x1",
@@ -189,9 +171,7 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
                 )
 
     def test_numpy_core_umath_functions_kwargs_default_values(self):
-        """
-        Test the default values for keyword arguments.
-        """
+        """Test the default values for keyword arguments."""
         exact_kwargs_default_values = [None, True, "same_kind", "K", None, True]
         for func in self.one_arg_ufunc + self.two_args_ufunc:
             with self.subTest(func=func):
@@ -213,9 +193,7 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
         return node.infer()
 
     def test_numpy_core_umath_functions_return_type(self):
-        """
-        Test that functions which should return a ndarray do return it
-        """
+        """Test that functions which should return a ndarray do return it."""
         ndarray_returning_func = [
             f for f in self.all_ufunc if f not in ("frexp", "modf")
         ]
@@ -234,9 +212,7 @@ class NumpyBrainCoreUmathTest(unittest.TestCase):
                 )
 
     def test_numpy_core_umath_functions_return_type_tuple(self):
-        """
-        Test that functions which should return a pair of ndarray do return it
-        """
+        """Test that functions which should return a pair of ndarray do return it."""
         ndarray_returning_func = ("frexp", "modf")
 
         for func_ in ndarray_returning_func:

@@ -1,42 +1,34 @@
-# Copyright (c) 2006-2011, 2013-2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2013 Phil Schaf <flying-sheep@web.de>
-# Copyright (c) 2014-2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014-2015 Google, Inc.
-# Copyright (c) 2014 Alexander Presnyakov <flagist0@gmail.com>
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2016 Derek Gustafson <degustaf@gmail.com>
-# Copyright (c) 2017 Łukasz Rogalski <rogalski.91@gmail.com>
-# Copyright (c) 2018 Anthony Sottile <asottile@umich.edu>
-# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Tushar Sadhwani <86737547+tushar-deepsource@users.noreply.github.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Gregory P. Smith <greg@krypto.org>
-# Copyright (c) 2021 Kian Meng, Ang <kianmeng.ang@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
-"""The AstroidBuilder makes astroid from living object and / or from _ast
+"""The AstroidBuilder makes astroid from living object and / or from _ast.
 
 The builder is not thread safe and can't be used to parse different sources
 at the same time.
 """
+
+from __future__ import annotations
+
+import ast
 import os
 import textwrap
 import types
+from collections.abc import Iterator, Sequence
+from io import TextIOWrapper
 from tokenize import detect_encoding
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING
 
 from astroid import bases, modutils, nodes, raw_building, rebuilder, util
-from astroid._ast import get_parser_module
+from astroid._ast import ParserModule, get_parser_module
 from astroid.exceptions import AstroidBuildingError, AstroidSyntaxError, InferenceError
 from astroid.manager import AstroidManager
-from astroid.nodes.node_classes import NodeNG
 
-objects = util.lazy_import("objects")
+if TYPE_CHECKING:
+    from astroid import objects
+else:
+    objects = util.lazy_import("objects")
+
 
 # The name of the transient function that is used to
 # wrap expressions to be extracted when calling
@@ -49,7 +41,7 @@ _STATEMENT_SELECTOR = "#@"
 MISPLACED_TYPE_ANNOTATION_ERROR = "misplaced type annotation"
 
 
-def open_source_file(filename):
+def open_source_file(filename: str) -> tuple[TextIOWrapper, str, str]:
     # pylint: disable=consider-using-with
     with open(filename, "rb") as byte_stream:
         encoding = detect_encoding(byte_stream.readline)[0]
@@ -58,7 +50,7 @@ def open_source_file(filename):
     return stream, encoding, data
 
 
-def _can_assign_attr(node, attrname):
+def _can_assign_attr(node: nodes.ClassDef, attrname: str | None) -> bool:
     try:
         slots = node.slots()
     except NotImplementedError:
@@ -79,13 +71,14 @@ class AstroidBuilder(raw_building.InspectBuilder):
     by default being True.
     """
 
-    # pylint: disable=redefined-outer-name
-    def __init__(self, manager=None, apply_transforms=True):
+    def __init__(
+        self, manager: AstroidManager | None = None, apply_transforms: bool = True
+    ) -> None:
         super().__init__(manager)
         self._apply_transforms = apply_transforms
 
     def module_build(
-        self, module: types.ModuleType, modname: Optional[str] = None
+        self, module: types.ModuleType, modname: str | None = None
     ) -> nodes.Module:
         """Build an astroid from a living module instance."""
         node = None
@@ -110,10 +103,11 @@ class AstroidBuilder(raw_building.InspectBuilder):
                 # We have to handle transformation by ourselves since the
                 # rebuilder isn't called for builtin nodes
                 node = self._manager.visit_transforms(node)
+        assert isinstance(node, nodes.Module)
         return node
 
-    def file_build(self, path, modname=None):
-        """Build astroid from a source code file (i.e. from an ast)
+    def file_build(self, path: str, modname: str | None = None) -> nodes.Module:
+        """Build astroid from a source code file (i.e. from an ast).
 
         *path* is expected to be a python source file
         """
@@ -147,27 +141,31 @@ class AstroidBuilder(raw_building.InspectBuilder):
                 except ImportError:
                     modname = os.path.splitext(os.path.basename(path))[0]
             # build astroid representation
-            module = self._data_build(data, modname, path)
-            return self._post_build(module, encoding)
+            module, builder = self._data_build(data, modname, path)
+            return self._post_build(module, builder, encoding)
 
-    def string_build(self, data, modname="", path=None):
+    def string_build(
+        self, data: str, modname: str = "", path: str | None = None
+    ) -> nodes.Module:
         """Build astroid from source code string."""
-        module = self._data_build(data, modname, path)
+        module, builder = self._data_build(data, modname, path)
         module.file_bytes = data.encode("utf-8")
-        return self._post_build(module, "utf-8")
+        return self._post_build(module, builder, "utf-8")
 
-    def _post_build(self, module, encoding):
-        """Handles encoding and delayed nodes after a module has been built"""
+    def _post_build(
+        self, module: nodes.Module, builder: rebuilder.TreeRebuilder, encoding: str
+    ) -> nodes.Module:
+        """Handles encoding and delayed nodes after a module has been built."""
         module.file_encoding = encoding
         self._manager.cache_module(module)
         # post tree building steps after we stored the module in the cache:
-        for from_node in module._import_from_nodes:
+        for from_node in builder._import_from_nodes:
             if from_node.modname == "__future__":
                 for symbol, _ in from_node.names:
                     module.future_imports.add(symbol)
             self.add_from_names_to_locals(from_node)
         # handle delayed assattr nodes
-        for delayed in module._delayed_assattr:
+        for delayed in builder._delayed_assattr:
             self.delayed_assattr(delayed)
 
         # Visit the transforms
@@ -175,8 +173,10 @@ class AstroidBuilder(raw_building.InspectBuilder):
             module = self._manager.visit_transforms(module)
         return module
 
-    def _data_build(self, data, modname, path):
-        """Build tree node from data and add some information"""
+    def _data_build(
+        self, data: str, modname: str, path: str | None
+    ) -> tuple[nodes.Module, rebuilder.TreeRebuilder]:
+        """Build tree node from data and add some informations."""
         try:
             node, parser_module = _parse_string(data, type_comments=True)
         except (TypeError, ValueError, SyntaxError) as exc:
@@ -200,25 +200,24 @@ class AstroidBuilder(raw_building.InspectBuilder):
                 path is not None
                 and os.path.splitext(os.path.basename(path))[0] == "__init__"
             )
-        builder = rebuilder.TreeRebuilder(self._manager, parser_module)
+        builder = rebuilder.TreeRebuilder(self._manager, parser_module, data)
         module = builder.visit_module(node, modname, node_file, package)
-        module._import_from_nodes = builder._import_from_nodes
-        module._delayed_assattr = builder._delayed_assattr
-        return module
+        return module, builder
 
-    def add_from_names_to_locals(self, node):
-        """Store imported names to the locals
+    def add_from_names_to_locals(self, node: nodes.ImportFrom) -> None:
+        """Store imported names to the locals.
 
         Resort the locals if coming from a delayed node
         """
 
-        def _key_func(node):
-            return node.fromlineno
+        def _key_func(node: nodes.NodeNG) -> int:
+            return node.fromlineno or 0
 
-        def sort_locals(my_list):
+        def sort_locals(my_list: list[nodes.NodeNG]) -> None:
             my_list.sort(key=_key_func)
 
-        for (name, asname) in node.names:
+        assert node.parent  # It should always default to the module
+        for name, asname in node.names:
             if name == "*":
                 try:
                     imported = node.do_import_module()
@@ -226,13 +225,13 @@ class AstroidBuilder(raw_building.InspectBuilder):
                     continue
                 for name in imported.public_names():
                     node.parent.set_local(name, node)
-                    sort_locals(node.parent.scope().locals[name])
+                    sort_locals(node.parent.scope().locals[name])  # type: ignore[arg-type]
             else:
                 node.parent.set_local(asname or name, node)
-                sort_locals(node.parent.scope().locals[asname or name])
+                sort_locals(node.parent.scope().locals[asname or name])  # type: ignore[arg-type]
 
-    def delayed_assattr(self, node):
-        """Visit a AssAttr node
+    def delayed_assattr(self, node: nodes.AssignAttr) -> None:
+        """Visit a AssAttr node.
 
         This adds name to locals and handle members definition.
         """
@@ -242,8 +241,12 @@ class AstroidBuilder(raw_building.InspectBuilder):
                 if inferred is util.Uninferable:
                     continue
                 try:
-                    cls = inferred.__class__
-                    if cls is bases.Instance or cls is objects.ExceptionInstance:
+                    # pylint: disable=unidiomatic-typecheck # We want a narrow check on the
+                    # parent type, not all of its subclasses
+                    if (
+                        type(inferred) == bases.Instance
+                        or type(inferred) == objects.ExceptionInstance
+                    ):
                         inferred = inferred._proxied
                         iattrs = inferred.instance_attrs
                         if not _can_assign_attr(inferred, node.attrname):
@@ -251,6 +254,11 @@ class AstroidBuilder(raw_building.InspectBuilder):
                     elif isinstance(inferred, bases.Instance):
                         # Const, Tuple or other containers that inherit from
                         # `Instance`
+                        continue
+                    elif (
+                        isinstance(inferred, bases.Proxy)
+                        or inferred is util.Uninferable
+                    ):
                         continue
                     elif inferred.is_function:
                         iattrs = inferred.instance_attrs
@@ -275,12 +283,18 @@ class AstroidBuilder(raw_building.InspectBuilder):
             pass
 
 
-def build_namespace_package_module(name: str, path: List[str]) -> nodes.Module:
-    return nodes.Module(name, doc="", path=path, package=True)
+def build_namespace_package_module(name: str, path: Sequence[str]) -> nodes.Module:
+    # TODO: Typing: Remove the cast to list and just update typing to accept Sequence
+    return nodes.Module(name, path=list(path), package=True)
 
 
-def parse(code, module_name="", path=None, apply_transforms=True):
-    """Parses a source string in order to obtain an astroid AST from it
+def parse(
+    code: str,
+    module_name: str = "",
+    path: str | None = None,
+    apply_transforms: bool = True,
+) -> nodes.Module:
+    """Parses a source string in order to obtain an astroid AST from it.
 
     :param str code: The code for the module.
     :param str module_name: The name for the module, if any
@@ -296,7 +310,7 @@ def parse(code, module_name="", path=None, apply_transforms=True):
     return builder.string_build(code, modname=module_name, path=path)
 
 
-def _extract_expressions(node):
+def _extract_expressions(node: nodes.NodeNG) -> Iterator[nodes.NodeNG]:
     """Find expressions in a call to _TRANSIENT_FUNCTION and extract them.
 
     The function walks the AST recursively to search for expressions that
@@ -315,6 +329,7 @@ def _extract_expressions(node):
         and node.func.name == _TRANSIENT_FUNCTION
     ):
         real_expr = node.args[0]
+        assert node.parent
         real_expr.parent = node.parent
         # Search for node in all _astng_fields (the fields checked when
         # get_children is called) of its parent. Some of those fields may
@@ -323,7 +338,7 @@ def _extract_expressions(node):
         # like no call to _TRANSIENT_FUNCTION ever took place.
         for name in node.parent._astroid_fields:
             child = getattr(node.parent, name)
-            if isinstance(child, (list, tuple)):
+            if isinstance(child, list):
                 for idx, compound_child in enumerate(child):
                     if compound_child is node:
                         child[idx] = real_expr
@@ -335,7 +350,7 @@ def _extract_expressions(node):
             yield from _extract_expressions(child)
 
 
-def _find_statement_by_line(node, line):
+def _find_statement_by_line(node: nodes.NodeNG, line: int) -> nodes.NodeNG | None:
     """Extracts the statement on a specific line from an AST.
 
     If the line number of node matches line, it will be returned;
@@ -370,7 +385,7 @@ def _find_statement_by_line(node, line):
     return None
 
 
-def extract_node(code: str, module_name: str = "") -> Union[NodeNG, List[NodeNG]]:
+def extract_node(code: str, module_name: str = "") -> nodes.NodeNG | list[nodes.NodeNG]:
     """Parses some Python code as a module and extracts a designated AST node.
 
     Statements:
@@ -424,13 +439,13 @@ def extract_node(code: str, module_name: str = "") -> Union[NodeNG, List[NodeNG]
     :returns: The designated node from the parse tree, or a list of nodes.
     """
 
-    def _extract(node):
+    def _extract(node: nodes.NodeNG | None) -> nodes.NodeNG | None:
         if isinstance(node, nodes.Expr):
             return node.value
 
         return node
 
-    requested_lines = []
+    requested_lines: list[int] = []
     for idx, line in enumerate(code.splitlines()):
         if line.strip().endswith(_STATEMENT_SELECTOR):
             requested_lines.append(idx + 1)
@@ -439,7 +454,7 @@ def extract_node(code: str, module_name: str = "") -> Union[NodeNG, List[NodeNG]
     if not tree.body:
         raise ValueError("Empty tree, cannot extract from it")
 
-    extracted = []
+    extracted: list[nodes.NodeNG | None] = []
     if requested_lines:
         extracted = [_find_statement_by_line(tree, line) for line in requested_lines]
 
@@ -450,12 +465,23 @@ def extract_node(code: str, module_name: str = "") -> Union[NodeNG, List[NodeNG]
         extracted.append(tree.body[-1])
 
     extracted = [_extract(node) for node in extracted]
-    if len(extracted) == 1:
-        return extracted[0]
-    return extracted
+    extracted_without_none = [node for node in extracted if node is not None]
+    if len(extracted_without_none) == 1:
+        return extracted_without_none[0]
+    return extracted_without_none
 
 
-def _parse_string(data, type_comments=True):
+def _extract_single_node(code: str, module_name: str = "") -> nodes.NodeNG:
+    """Call extract_node while making sure that only one value is returned."""
+    ret = extract_node(code, module_name)
+    if isinstance(ret, list):
+        return ret[0]
+    return ret
+
+
+def _parse_string(
+    data: str, type_comments: bool = True
+) -> tuple[ast.Module, ParserModule]:
     parser_module = get_parser_module(type_comments=type_comments)
     try:
         parsed = parser_module.parse(data + "\n", type_comments=type_comments)

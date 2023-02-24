@@ -1,24 +1,13 @@
-# Copyright (c) 2010, 2013-2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2012 FELD Boris <lothiraldan@gmail.com>
-# Copyright (c) 2013-2018, 2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014 Google, Inc.
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2016 Jared Garst <jgarst@users.noreply.github.com>
-# Copyright (c) 2017, 2019 Łukasz Rogalski <rogalski.91@gmail.com>
-# Copyright (c) 2017 Hugo <hugovk@users.noreply.github.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
 import unittest
 from textwrap import dedent
 
-from astroid import nodes
+import pytest
+
+from astroid import exceptions, nodes
 from astroid.builder import AstroidBuilder, extract_node
 from astroid.test_utils import require_version
 
@@ -297,6 +286,33 @@ class Python3TC(unittest.TestCase):
             value = node.getitem(nodes.Const(key))
             self.assertIsInstance(value, nodes.Const)
             self.assertEqual(value.value, expected)
+
+    @staticmethod
+    def test_unpacking_in_dict_getitem_with_ref() -> None:
+        node = extract_node(
+            """
+        a = {1: 2}
+        {**a, 2: 3}  #@
+        """
+        )
+        assert isinstance(node, nodes.Dict)
+
+        for key, expected in ((1, 2), (2, 3)):
+            value = node.getitem(nodes.Const(key))
+            assert isinstance(value, nodes.Const)
+            assert value.value == expected
+
+    @staticmethod
+    def test_unpacking_in_dict_getitem_uninferable() -> None:
+        node = extract_node("{**a, 2: 3}")
+        assert isinstance(node, nodes.Dict)
+
+        with pytest.raises(exceptions.AstroidIndexError):
+            node.getitem(nodes.Const(1))
+
+        value = node.getitem(nodes.Const(2))
+        assert isinstance(value, nodes.Const)
+        assert value.value == 3
 
     def test_format_string(self) -> None:
         code = "f'{greetings} {person}'"

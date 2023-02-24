@@ -1,12 +1,7 @@
-# Copyright (c) 2019-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
+
 import unittest
 
 try:
@@ -21,9 +16,7 @@ from astroid import builder
 
 @unittest.skipUnless(HAS_NUMPY, "This test requires the numpy library.")
 class BrainNumpyCoreFunctionBaseTest(unittest.TestCase):
-    """
-    Test the numpy core numeric brain module
-    """
+    """Test the numpy core numeric brain module."""
 
     numpy_functions = (
         ("linspace", "1, 100"),
@@ -42,9 +35,7 @@ class BrainNumpyCoreFunctionBaseTest(unittest.TestCase):
         return node.infer()
 
     def test_numpy_function_calls_inferred_as_ndarray(self):
-        """
-        Test that calls to numpy functions are inferred as numpy.ndarray
-        """
+        """Test that calls to numpy functions are inferred as numpy.ndarray."""
         licit_array_types = (".ndarray",)
         for func_ in self.numpy_functions:
             with self.subTest(typ=func_):

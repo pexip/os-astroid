@@ -1,20 +1,12 @@
-# Copyright (c) 2015-2016, 2018, 2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 hippo91 <guillaume.peillex@gmail.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
+from __future__ import annotations
 
 import unittest
-from typing import List
 
-from astroid import bases, builder, nodes, objects
+from astroid import bases, builder, nodes, objects, util
 from astroid.exceptions import AttributeInferenceError, InferenceError, SuperError
 from astroid.objects import Super
 
@@ -39,6 +31,24 @@ class ObjectsTest(unittest.TestCase):
         proxied = inferred._proxied
         self.assertEqual(inferred.qname(), "builtins.frozenset")
         self.assertIsInstance(proxied, nodes.ClassDef)
+
+    def test_lookup_regression_slots(self) -> None:
+        """Regression test for attr__new__ of ObjectModel.
+
+        ObjectModel._instance is not always an bases.Instance, so we can't
+        rely on the ._proxied attribute of an Instance.
+        """
+
+        node = builder.extract_node(
+            """
+        class ClassHavingUnknownAncestors(Unknown):
+            __slots__ = ["yo"]
+
+            def test(self):
+                self.not_yo = 42
+        """
+        )
+        assert node.getattr("__new__")
 
 
 class SuperTests(unittest.TestCase):
@@ -444,7 +454,7 @@ class SuperTests(unittest.TestCase):
         selfclass = third.getattr("__self_class__")[0]
         self.assertEqual(selfclass.name, "A")
 
-    def assertEqualMro(self, klass: Super, expected_mro: List[str]) -> None:
+    def assertEqualMro(self, klass: Super, expected_mro: list[str]) -> None:
         self.assertEqual([member.name for member in klass.super_mro()], expected_mro)
 
     def test_super_mro(self) -> None:
@@ -531,7 +541,7 @@ class SuperTests(unittest.TestCase):
 
     def test_super_qname(self) -> None:
         """Make sure a Super object generates a qname
-        equivalent to super.__qname__
+        equivalent to super.__qname__.
         """
         # See issue 533
         code = """
@@ -541,6 +551,42 @@ class SuperTests(unittest.TestCase):
         """
         super_obj = next(builder.extract_node(code).infer())
         self.assertEqual(super_obj.qname(), "super")
+
+    def test_super_new_call(self) -> None:
+        """Test that __new__ returns an object or node and not a (Un)BoundMethod."""
+        new_call_result: nodes.Name = builder.extract_node(
+            """
+        import enum
+        class ChoicesMeta(enum.EnumMeta):
+            def __new__(metacls, classname, bases, classdict, **kwds):
+                cls = super().__new__(metacls, "str", (enum.Enum,), enum._EnumDict(), **kwargs)
+                cls #@
+        """
+        )
+        inferred = list(new_call_result.infer())
+        assert all(
+            isinstance(i, (nodes.NodeNG, type(util.Uninferable))) for i in inferred
+        )
+
+    def test_super_init_call(self) -> None:
+        """Test that __init__ is still callable."""
+        init_node: nodes.Attribute = builder.extract_node(
+            """
+        class SuperUsingClass:
+            @staticmethod
+            def test():
+                super(object, 1).__new__ #@
+                super(object, 1).__init__ #@
+        class A:
+            pass
+        A().__new__ #@
+        A().__init__ #@
+        """
+        )
+        assert isinstance(next(init_node[0].infer()), bases.BoundMethod)
+        assert isinstance(next(init_node[1].infer()), bases.BoundMethod)
+        assert isinstance(next(init_node[2].infer()), bases.BoundMethod)
+        assert isinstance(next(init_node[3].infer()), bases.BoundMethod)
 
 
 if __name__ == "__main__":

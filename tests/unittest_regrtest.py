@@ -1,34 +1,21 @@
-# Copyright (c) 2006-2008, 2010-2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2007 Marien Zwart <marienz@gentoo.org>
-# Copyright (c) 2013-2014 Google, Inc.
-# Copyright (c) 2014-2016, 2018-2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014 Eevee (Alex Munroe) <amunroe@yelp.com>
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2016 Jakub Wilk <jwilk@jwilk.net>
-# Copyright (c) 2018 Nick Drozd <nicholasdrozd@gmail.com>
-# Copyright (c) 2018 Anthony Sottile <asottile@umich.edu>
-# Copyright (c) 2019, 2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
 import sys
 import textwrap
 import unittest
+from unittest import mock
 
 import pytest
 
-from astroid import MANAGER, Instance, nodes, parse, test_utils
-from astroid.builder import AstroidBuilder, extract_node
+from astroid import MANAGER, Instance, bases, nodes, parse, test_utils
+from astroid.builder import AstroidBuilder, _extract_single_node, extract_node
 from astroid.const import PY38_PLUS
+from astroid.context import InferenceContext
 from astroid.exceptions import InferenceError
 from astroid.raw_building import build_module
+from astroid.util import Uninferable
 
 from . import resources
 
@@ -81,7 +68,7 @@ class NonRegressionTests(resources.AstroidCacheSetupMixin, unittest.TestCase):
 
     @unittest.skipIf(not HAS_NUMPY, "Needs numpy")
     def test_numpy_crash(self):
-        """test don't crash on numpy"""
+        """Test don't crash on numpy."""
         # a crash occurred somewhere in the past, and an
         # InferenceError instead of a crash was better, but now we even infer!
         builder = AstroidBuilder()
@@ -94,6 +81,23 @@ multiply([1, 2], [3, 4])
         callfunc = astroid.body[1].value.func
         inferred = callfunc.inferred()
         self.assertEqual(len(inferred), 1)
+
+    @unittest.skipUnless(HAS_NUMPY, "Needs numpy")
+    def test_numpy_distutils(self):
+        """Special handling of virtualenv's patching of distutils shouldn't interfere
+        with numpy.distutils.
+
+        PY312_PLUS -- This test will likely become unnecessary when Python 3.12 is
+        numpy's minimum version. (numpy.distutils will be removed then.)
+        """
+        node = extract_node(
+            """
+from numpy.distutils.misc_util import is_sequence
+is_sequence("ABC") #@
+"""
+        )
+        inferred = node.inferred()
+        self.assertIsInstance(inferred[0], nodes.Const)
 
     def test_nameconstant(self) -> None:
         # used to fail for Python 3.4
@@ -301,16 +305,6 @@ def test(val):
         inferred = next(node.infer())
         self.assertEqual(inferred.decoratornames(), {".Parent.foo.getter"})
 
-    def test_ssl_protocol(self) -> None:
-        node = extract_node(
-            """
-        import ssl
-        ssl.PROTOCOL_TLSv1
-        """
-        )
-        inferred = next(node.infer())
-        self.assertIsInstance(inferred, nodes.Const)
-
     def test_recursive_property_method(self) -> None:
         node = extract_node(
             """
@@ -380,7 +374,9 @@ def test_crash_in_dunder_inference_prevented() -> None:
 
 
 def test_regression_crash_classmethod() -> None:
-    """Regression test for a crash reported in https://github.com/PyCQA/pylint/issues/4982"""
+    """Regression test for a crash reported in
+    https://github.com/PyCQA/pylint/issues/4982.
+    """
     code = """
     class Base:
         @classmethod
@@ -397,6 +393,52 @@ def test_regression_crash_classmethod() -> None:
         pass
     """
     parse(code)
+
+
+def test_max_inferred_for_complicated_class_hierarchy() -> None:
+    """Regression test for a crash reported in
+    https://github.com/PyCQA/pylint/issues/5679.
+
+    The class hierarchy of 'sqlalchemy' is so intricate that it becomes uninferable with
+    the standard max_inferred of 100. We used to crash when this happened.
+    """
+    # Create module and get relevant nodes
+    module = resources.build_file(
+        str(resources.RESOURCE_PATH / "max_inferable_limit_for_classes" / "main.py")
+    )
+    init_attr_node = module.body[-1].body[0].body[0].value.func
+    init_object_node = module.body[-1].mro()[-1]["__init__"]
+    super_node = next(init_attr_node.expr.infer())
+
+    # Arbitrarily limit the max number of infered nodes per context
+    InferenceContext.max_inferred = -1
+    context = InferenceContext()
+
+    # Try to infer 'object.__init__' > because of limit is impossible
+    for inferred in bases._infer_stmts([init_object_node], context, frame=super):
+        assert inferred == Uninferable
+
+    # Reset inference limit
+    InferenceContext.max_inferred = 100
+    # Check that we don't crash on a previously uninferable node
+    assert super_node.getattr("__init__", context=context)[0] == Uninferable
+
+
+@mock.patch(
+    "astroid.nodes.ImportFrom._infer",
+    side_effect=RecursionError,
+)
+def test_recursion_during_inference(mocked) -> None:
+    """Check that we don't crash if we hit the recursion limit during inference."""
+    node: nodes.Call = _extract_single_node(
+        """
+    from module import something
+    something()
+    """
+    )
+    with pytest.raises(InferenceError) as error:
+        next(node.infer())
+    assert error.value.message.startswith("RecursionError raised")
 
 
 if __name__ == "__main__":
