@@ -1,3 +1,7 @@
+# Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
+# For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
+
 import sys
 
 import pytest
@@ -6,7 +10,8 @@ from astroid import extract_node, nodes
 
 pytestmark = pytest.mark.skipif(
     hasattr(sys, "pypy_version_info"),
-    reason="pypy has its own implementation of _ctypes module which is different from the one of cpython",
+    reason="pypy has its own implementation of _ctypes module which is different "
+    "from the one of cpython",
 )
 
 
@@ -52,8 +57,8 @@ pytestmark = pytest.mark.skipif(
     ],
 )
 def test_ctypes_redefined_types_members(c_type, builtin_type, type_code):
-    """
-    Test that the "value" and "_type_" member of each redefined types are correct
+    """Test that the "value" and "_type_" member of each redefined types are
+    correct.
     """
     src = f"""
     import ctypes
@@ -79,8 +84,9 @@ def test_ctypes_redefined_types_members(c_type, builtin_type, type_code):
 
 def test_cdata_member_access() -> None:
     """
-    Test that the base members are still accessible. Each redefined ctypes type inherits from _SimpleCData which itself
-    inherits from _CData. Checks that _CData members are accessibles
+    Test that the base members are still accessible. Each redefined ctypes type
+    inherits from _SimpleCData which itself inherits from _CData. Checks that
+    _CData members are accessible.
     """
     src = """
     import ctypes
@@ -96,7 +102,8 @@ def test_cdata_member_access() -> None:
 
 def test_other_ctypes_member_untouched() -> None:
     """
-    Test that other ctypes members, which are not touched by the brain, are correctly inferred
+    Test that other ctypes members, which are not touched by the brain, are correctly
+    inferred.
     """
     src = """
     import ctypes

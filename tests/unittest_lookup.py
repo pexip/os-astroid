@@ -1,21 +1,8 @@
-# Copyright (c) 2007-2013 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2010 Daniel Harding <dharding@gmail.com>
-# Copyright (c) 2014-2016, 2018-2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014 Google, Inc.
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2019 Hugo van Kemenade <hugovk@users.noreply.github.com>
-# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 David Liu <david@cs.toronto.edu>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
-"""tests for the astroid variable lookup capabilities
-"""
+"""Tests for the astroid variable lookup capabilities."""
 import functools
 import unittest
 
@@ -95,7 +82,7 @@ class LookupTest(resources.SysPathSetup, unittest.TestCase):
         name = next(cls2.nodes_of_class(nodes.Name))
         self.assertEqual(next(name.infer()), cls1)
 
-    ### backport those test to inline code
+    # backport those test to inline code
     def test_method(self) -> None:
         method = self.module["YOUPI"]["method"]
         my_dict = next(method.ilookup("MY_DICT"))
@@ -167,7 +154,7 @@ class LookupTest(resources.SysPathSetup, unittest.TestCase):
         self.assertEqual(xnames[2].lookup("i")[1][0].lineno, 4)
 
     def test_list_comp_target(self) -> None:
-        """test the list comprehension target"""
+        """Test the list comprehension target."""
         astroid = builder.parse(
             """
             ten = [ var for var in range(10) ]
@@ -478,7 +465,7 @@ class LookupTest(resources.SysPathSetup, unittest.TestCase):
 
 
 class LookupControlFlowTest(unittest.TestCase):
-    """Tests for lookup capabilities and control flow"""
+    """Tests for lookup capabilities and control flow."""
 
     def test_consecutive_assign(self) -> None:
         """When multiple assignment statements are in the same block, only the last one
@@ -507,7 +494,7 @@ class LookupControlFlowTest(unittest.TestCase):
         self.assertEqual(len(stmts), 0)
 
     def test_del_removes_prior(self) -> None:
-        """Delete statement removes any prior assignments"""
+        """Delete statement removes any prior assignments."""
         code = """
             x = 10
             del x
@@ -519,7 +506,7 @@ class LookupControlFlowTest(unittest.TestCase):
         self.assertEqual(len(stmts), 0)
 
     def test_del_no_effect_after(self) -> None:
-        """Delete statement doesn't remove future assignments"""
+        """Delete statement doesn't remove future assignments."""
         code = """
             x = 10
             del x
@@ -638,7 +625,9 @@ class LookupControlFlowTest(unittest.TestCase):
 
     def test_if_else(self) -> None:
         """When an assignment statement appears in both an if and else branch, both
-        are added. This does NOT replace an assignment statement appearing before the
+        are added.
+
+        This does NOT replace an assignment statement appearing before the
         if statement. (See issue #213)
         """
         code = """

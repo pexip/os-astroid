@@ -1,65 +1,43 @@
-# Copyright (c) 2009-2011, 2013-2014 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2010 Daniel Harding <dharding@gmail.com>
-# Copyright (c) 2012 FELD Boris <lothiraldan@gmail.com>
-# Copyright (c) 2013-2014 Google, Inc.
-# Copyright (c) 2014-2021 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014 Eevee (Alex Munroe) <amunroe@yelp.com>
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2015 Florian Bruhin <me@the-compiler.org>
-# Copyright (c) 2016-2017 Derek Gustafson <degustaf@gmail.com>
-# Copyright (c) 2016 Jared Garst <jgarst@users.noreply.github.com>
-# Copyright (c) 2016 Jakub Wilk <jwilk@jwilk.net>
-# Copyright (c) 2016 Dave Baum <dbaum@google.com>
-# Copyright (c) 2017-2020 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2017, 2019 Łukasz Rogalski <rogalski.91@gmail.com>
-# Copyright (c) 2017 rr- <rr-@sakuya.pl>
-# Copyright (c) 2018, 2021 Nick Drozd <nicholasdrozd@gmail.com>
-# Copyright (c) 2018-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
-# Copyright (c) 2018 Ville Skyttä <ville.skytta@iki.fi>
-# Copyright (c) 2018 brendanator <brendan.maginnis@gmail.com>
-# Copyright (c) 2018 HoverHell <hoverhell@gmail.com>
-# Copyright (c) 2019 kavins14 <kavin.singh@mail.utoronto.ca>
-# Copyright (c) 2019 kavins14 <kavinsingh@hotmail.com>
-# Copyright (c) 2020 Raphael Gaschignard <raphael@rtpg.co>
-# Copyright (c) 2020 Bryce Guinta <bryce.guinta@protonmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Tushar Sadhwani <86737547+tushar-deepsource@users.noreply.github.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Kian Meng, Ang <kianmeng.ang@gmail.com>
-# Copyright (c) 2021 David Liu <david@cs.toronto.edu>
-# Copyright (c) 2021 Alphadelta14 <alpha@alphaservcomputing.solutions>
-# Copyright (c) 2021 Andrew Haigh <hello@nelf.in>
-# Copyright (c) 2021 Federico Bond <federicobond@gmail.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
 """Module for some node classes. More nodes in scoped_nodes.py"""
+
+from __future__ import annotations
 
 import abc
 import itertools
 import sys
 import typing
 import warnings
+from collections.abc import Generator, Iterable, Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Generator, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, TypeVar, Union
 
-from astroid import decorators, mixins, util
+from astroid import decorators, util
 from astroid.bases import Instance, _infer_stmts
-from astroid.const import Context
+from astroid.const import _EMPTY_OBJECT_MARKER, Context
 from astroid.context import InferenceContext
 from astroid.exceptions import (
     AstroidIndexError,
     AstroidTypeError,
+    AstroidValueError,
     InferenceError,
     NoDefault,
     ParentMissingError,
 )
 from astroid.manager import AstroidManager
+from astroid.nodes import _base_nodes
 from astroid.nodes.const import OP_PRECEDENCE
 from astroid.nodes.node_ng import NodeNG
+from astroid.typing import (
+    ConstFactoryResult,
+    InferBinaryOp,
+    InferenceErrorInfo,
+    InferenceResult,
+    SuccessfulInferenceResult,
+)
 
 if sys.version_info >= (3, 8):
     from typing import Literal
@@ -70,27 +48,42 @@ if TYPE_CHECKING:
     from astroid import nodes
     from astroid.nodes import LocalsDictNodeNG
 
+if sys.version_info >= (3, 8):
+    from functools import cached_property
+else:
+    from astroid.decorators import cachedproperty as cached_property
 
-def _is_const(value):
+
+def _is_const(value) -> bool:
     return isinstance(value, tuple(CONST_CLS))
 
 
-T_Nodes = TypeVar("T_Nodes", bound=NodeNG)
+_NodesT = TypeVar("_NodesT", bound=NodeNG)
+_BadOpMessageT = TypeVar("_BadOpMessageT", bound=util.BadOperationMessage)
 
 AssignedStmtsPossibleNode = Union["List", "Tuple", "AssignName", "AssignAttr", None]
 AssignedStmtsCall = Callable[
     [
-        T_Nodes,
+        _NodesT,
         AssignedStmtsPossibleNode,
         Optional[InferenceContext],
         Optional[typing.List[int]],
     ],
     Any,
 ]
+InferBinaryOperation = Callable[
+    [_NodesT, Optional[InferenceContext]],
+    typing.Generator[Union[InferenceResult, _BadOpMessageT], None, None],
+]
+InferLHS = Callable[
+    [_NodesT, Optional[InferenceContext]],
+    typing.Generator[InferenceResult, None, Optional[InferenceErrorInfo]],
+]
+InferUnaryOp = Callable[[_NodesT, str], ConstFactoryResult]
 
 
 @decorators.raise_if_nothing_inferred
-def unpack_infer(stmt, context=None):
+def unpack_infer(stmt, context: InferenceContext | None = None):
     """recursively generate nodes inferred by the given statement.
     If the inferred value is a list or a tuple, recurse on the elements
     """
@@ -100,12 +93,12 @@ def unpack_infer(stmt, context=None):
                 yield elt
                 continue
             yield from unpack_infer(elt, context)
-        return dict(node=stmt, context=context)
+        return {"node": stmt, "context": context}
     # if inferred is a final node, return it and stop
     inferred = next(stmt.infer(context), util.Uninferable)
     if inferred is stmt:
         yield inferred
-        return dict(node=stmt, context=context)
+        return {"node": stmt, "context": context}
     # else, infer recursively, except Uninferable object that should be returned as is
     for inferred in stmt.infer(context):
         if inferred is util.Uninferable:
@@ -113,10 +106,10 @@ def unpack_infer(stmt, context=None):
         else:
             yield from unpack_infer(inferred, context)
 
-    return dict(node=stmt, context=context)
+    return {"node": stmt, "context": context}
 
 
-def are_exclusive(stmt1, stmt2, exceptions: Optional[typing.List[str]] = None) -> bool:
+def are_exclusive(stmt1, stmt2, exceptions: list[str] | None = None) -> bool:
     """return true if the two given statements are mutually exclusive
 
     `exceptions` may be a list of exception names. If specified, discard If
@@ -190,7 +183,7 @@ def are_exclusive(stmt1, stmt2, exceptions: Optional[typing.List[str]] = None) -
 _SLICE_SENTINEL = object()
 
 
-def _slice_value(index, context=None):
+def _slice_value(index, context: InferenceContext | None = None):
     """Get the value of the given slice index."""
 
     if isinstance(index, Const):
@@ -217,7 +210,7 @@ def _slice_value(index, context=None):
     return _SLICE_SENTINEL
 
 
-def _infer_slice(node, context=None):
+def _infer_slice(node, context: InferenceContext | None = None):
     lower = _slice_value(node.lower, context)
     upper = _slice_value(node.upper, context)
     step = _slice_value(node.step, context)
@@ -232,7 +225,7 @@ def _infer_slice(node, context=None):
     )
 
 
-def _container_getitem(instance, elts, index, context=None):
+def _container_getitem(instance, elts, index, context: InferenceContext | None = None):
     """Get a slice or an item, using the given *index*, for the given sequence."""
     try:
         if isinstance(index, Slice):
@@ -243,6 +236,13 @@ def _container_getitem(instance, elts, index, context=None):
             return new_cls
         if isinstance(index, Const):
             return elts[index.value]
+    except ValueError as exc:
+        raise AstroidValueError(
+            message="Slice {index!r} cannot index container",
+            node=instance,
+            index=index,
+            context=context,
+        ) from exc
     except IndexError as exc:
         raise AstroidIndexError(
             message="Index {index!s} out of range",
@@ -258,53 +258,19 @@ def _container_getitem(instance, elts, index, context=None):
     raise AstroidTypeError(f"Could not use {index} as subscript index")
 
 
-class Statement(NodeNG):
-    """Statement node adding a few attributes"""
-
-    is_statement = True
-    """Whether this node indicates a statement."""
-
-    def next_sibling(self):
-        """The next sibling statement node.
-
-        :returns: The next sibling statement node.
-        :rtype: NodeNG or None
-        """
-        stmts = self.parent.child_sequence(self)
-        index = stmts.index(self)
-        try:
-            return stmts[index + 1]
-        except IndexError:
-            return None
-
-    def previous_sibling(self):
-        """The previous sibling statement.
-
-        :returns: The previous sibling statement node.
-        :rtype: NodeNG or None
-        """
-        stmts = self.parent.child_sequence(self)
-        index = stmts.index(self)
-        if index >= 1:
-            return stmts[index - 1]
-        return None
-
-
-class BaseContainer(
-    mixins.ParentAssignTypeMixin, NodeNG, Instance, metaclass=abc.ABCMeta
-):
+class BaseContainer(_base_nodes.ParentAssignNode, Instance, metaclass=abc.ABCMeta):
     """Base class for Set, FrozenSet, Tuple and List."""
 
     _astroid_fields = ("elts",)
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -319,7 +285,7 @@ class BaseContainer(
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.elts: typing.List[NodeNG] = []
+        self.elts: list[NodeNG] = []
         """The elements in the node."""
 
         super().__init__(
@@ -330,7 +296,7 @@ class BaseContainer(
             parent=parent,
         )
 
-    def postinit(self, elts: typing.List[NodeNG]) -> None:
+    def postinit(self, elts: list[NodeNG]) -> None:
         """Do some setup after initialisation.
 
         :param elts: The list of elements the that node contains.
@@ -362,31 +328,30 @@ class BaseContainer(
         """
         return self.elts
 
-    def bool_value(self, context=None):
+    def bool_value(self, context: InferenceContext | None = None) -> bool:
         """Determine the boolean value of this node.
 
         :returns: The boolean value of this node.
-        :rtype: bool or Uninferable
         """
         return bool(self.elts)
 
     @abc.abstractmethod
-    def pytype(self):
+    def pytype(self) -> str:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
 
     def get_children(self):
         yield from self.elts
 
 
-class LookupMixIn:
+# TODO: Move into _base_nodes. Blocked by import of _infer_stmts from bases.
+class LookupMixIn(NodeNG):
     """Mixin to look up a name in the right scope."""
 
-    @lru_cache(maxsize=None)
-    def lookup(self, name):
+    @lru_cache()  # noqa
+    def lookup(self, name: str) -> tuple[LocalsDictNodeNG, list[NodeNG]]:
         """Lookup where the given variable is assigned.
 
         The lookup starts from self's scope. If self is not a frame itself
@@ -394,12 +359,10 @@ class LookupMixIn:
         filtered to remove ignorable statements according to self's location.
 
         :param name: The name of the variable to find assignments for.
-        :type name: str
 
         :returns: The scope node and the list of assignments associated to the
             given name according to the scope where it has been found (locals,
             globals or builtin).
-        :rtype: tuple(str, list(NodeNG))
         """
         return self.scope().scope_lookup(self, name)
 
@@ -421,9 +384,7 @@ class LookupMixIn:
 # Name classes
 
 
-class AssignName(
-    mixins.NoChildrenMixin, LookupMixIn, mixins.ParentAssignTypeMixin, NodeNG
-):
+class AssignName(_base_nodes.NoChildrenNode, LookupMixIn, _base_nodes.ParentAssignNode):
     """Variation of :class:`ast.Assign` representing assignment to a name.
 
     An :class:`AssignName` is the name of something that is assigned to.
@@ -441,16 +402,18 @@ class AssignName(
 
     _other_fields = ("name",)
 
+    infer_lhs: ClassVar[InferLHS[AssignName]]
+
     @decorators.deprecate_default_argument_values(name="str")
     def __init__(
         self,
-        name: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        name: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param name: The name that is assigned to.
@@ -467,7 +430,7 @@ class AssignName(
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.name: Optional[str] = name
+        self.name: str | None = name
         """The name that is assigned to."""
 
         super().__init__(
@@ -478,15 +441,13 @@ class AssignName(
             parent=parent,
         )
 
-    assigned_stmts: AssignedStmtsCall["AssignName"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[AssignName]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
 
-class DelName(
-    mixins.NoChildrenMixin, LookupMixIn, mixins.ParentAssignTypeMixin, NodeNG
-):
+class DelName(_base_nodes.NoChildrenNode, LookupMixIn, _base_nodes.ParentAssignNode):
     """Variation of :class:`ast.Delete` representing deletion of a name.
 
     A :class:`DelName` is the name of something that is deleted.
@@ -504,13 +465,13 @@ class DelName(
     @decorators.deprecate_default_argument_values(name="str")
     def __init__(
         self,
-        name: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        name: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param name: The name that is being deleted.
@@ -527,7 +488,7 @@ class DelName(
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.name: Optional[str] = name
+        self.name: str | None = name
         """The name that is being deleted."""
 
         super().__init__(
@@ -539,7 +500,7 @@ class DelName(
         )
 
 
-class Name(mixins.NoChildrenMixin, LookupMixIn, NodeNG):
+class Name(_base_nodes.NoChildrenNode, LookupMixIn):
     """Class representing an :class:`ast.Name` node.
 
     A :class:`Name` node is something that is named, but not covered by
@@ -560,13 +521,13 @@ class Name(mixins.NoChildrenMixin, LookupMixIn, NodeNG):
     @decorators.deprecate_default_argument_values(name="str")
     def __init__(
         self,
-        name: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        name: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param name: The name that this node refers to.
@@ -583,7 +544,7 @@ class Name(mixins.NoChildrenMixin, LookupMixIn, NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.name: Optional[str] = name
+        self.name: str | None = name
         """The name that this node refers to."""
 
         super().__init__(
@@ -601,7 +562,7 @@ class Name(mixins.NoChildrenMixin, LookupMixIn, NodeNG):
             yield from child_node._get_name_nodes()
 
 
-class Arguments(mixins.AssignTypeMixin, NodeNG):
+class Arguments(_base_nodes.AssignTypeNode):
     """Class representing an :class:`ast.arguments` node.
 
     An :class:`Arguments` node represents that arguments in a
@@ -650,9 +611,9 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
 
     def __init__(
         self,
-        vararg: Optional[str] = None,
-        kwarg: Optional[str] = None,
-        parent: Optional[NodeNG] = None,
+        vararg: str | None = None,
+        kwarg: str | None = None,
+        parent: NodeNG | None = None,
     ) -> None:
         """
         :param vararg: The name of the variable length arguments.
@@ -663,84 +624,87 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
         """
         super().__init__(parent=parent)
 
-        self.vararg: Optional[str] = vararg  # can be None
+        self.vararg: str | None = vararg  # can be None
         """The name of the variable length arguments."""
 
-        self.kwarg: Optional[str] = kwarg  # can be None
+        self.kwarg: str | None = kwarg  # can be None
         """The name of the variable length keyword arguments."""
 
-        self.args: typing.Optional[typing.List[AssignName]]
+        self.args: list[AssignName] | None
         """The names of the required arguments.
 
         Can be None if the associated function does not have a retrievable
         signature and the arguments are therefore unknown.
-        This happens with builtin functions implemented in C.
+        This can happen with (builtin) functions implemented in C that have
+        incomplete signature information.
         """
+        # TODO: Check if other attributes should also be None when
+        # .args is None.
 
-        self.defaults: typing.List[NodeNG]
+        self.defaults: list[NodeNG] | None
         """The default values for arguments that can be passed positionally."""
 
-        self.kwonlyargs: typing.List[AssignName]
+        self.kwonlyargs: list[AssignName]
         """The keyword arguments that cannot be passed positionally."""
 
-        self.posonlyargs: typing.List[AssignName] = []
+        self.posonlyargs: list[AssignName] = []
         """The arguments that can only be passed positionally."""
 
-        self.kw_defaults: typing.List[Optional[NodeNG]]
+        self.kw_defaults: list[NodeNG | None]
         """The default values for keyword arguments that cannot be passed positionally."""
 
-        self.annotations: typing.List[Optional[NodeNG]]
+        self.annotations: list[NodeNG | None]
         """The type annotations of arguments that can be passed positionally."""
 
-        self.posonlyargs_annotations: typing.List[Optional[NodeNG]] = []
+        self.posonlyargs_annotations: list[NodeNG | None] = []
         """The type annotations of arguments that can only be passed positionally."""
 
-        self.kwonlyargs_annotations: typing.List[Optional[NodeNG]] = []
+        self.kwonlyargs_annotations: list[NodeNG | None] = []
         """The type annotations of arguments that cannot be passed positionally."""
 
-        self.type_comment_args: typing.List[Optional[NodeNG]] = []
+        self.type_comment_args: list[NodeNG | None] = []
         """The type annotation, passed by a type comment, of each argument.
 
         If an argument does not have a type comment,
         the value for that argument will be None.
         """
 
-        self.type_comment_kwonlyargs: typing.List[Optional[NodeNG]] = []
+        self.type_comment_kwonlyargs: list[NodeNG | None] = []
         """The type annotation, passed by a type comment, of each keyword only argument.
 
         If an argument does not have a type comment,
         the value for that argument will be None.
         """
 
-        self.type_comment_posonlyargs: typing.List[Optional[NodeNG]] = []
+        self.type_comment_posonlyargs: list[NodeNG | None] = []
         """The type annotation, passed by a type comment, of each positional argument.
 
         If an argument does not have a type comment,
         the value for that argument will be None.
         """
 
-        self.varargannotation: Optional[NodeNG] = None  # can be None
+        self.varargannotation: NodeNG | None = None  # can be None
         """The type annotation for the variable length arguments."""
 
-        self.kwargannotation: Optional[NodeNG] = None  # can be None
+        self.kwargannotation: NodeNG | None = None  # can be None
         """The type annotation for the variable length keyword arguments."""
 
     # pylint: disable=too-many-arguments
     def postinit(
         self,
-        args: typing.List[AssignName],
-        defaults: typing.List[NodeNG],
-        kwonlyargs: typing.List[AssignName],
-        kw_defaults: typing.List[Optional[NodeNG]],
-        annotations: typing.List[Optional[NodeNG]],
-        posonlyargs: Optional[typing.List[AssignName]] = None,
-        kwonlyargs_annotations: Optional[typing.List[Optional[NodeNG]]] = None,
-        posonlyargs_annotations: Optional[typing.List[Optional[NodeNG]]] = None,
-        varargannotation: Optional[NodeNG] = None,
-        kwargannotation: Optional[NodeNG] = None,
-        type_comment_args: Optional[typing.List[Optional[NodeNG]]] = None,
-        type_comment_kwonlyargs: Optional[typing.List[Optional[NodeNG]]] = None,
-        type_comment_posonlyargs: Optional[typing.List[Optional[NodeNG]]] = None,
+        args: list[AssignName] | None,
+        defaults: list[NodeNG] | None,
+        kwonlyargs: list[AssignName],
+        kw_defaults: list[NodeNG | None],
+        annotations: list[NodeNG | None],
+        posonlyargs: list[AssignName] | None = None,
+        kwonlyargs_annotations: list[NodeNG | None] | None = None,
+        posonlyargs_annotations: list[NodeNG | None] | None = None,
+        varargannotation: NodeNG | None = None,
+        kwargannotation: NodeNG | None = None,
+        type_comment_args: list[NodeNG | None] | None = None,
+        type_comment_kwonlyargs: list[NodeNG | None] | None = None,
+        type_comment_posonlyargs: list[NodeNG | None] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -804,7 +768,7 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
         if type_comment_posonlyargs is not None:
             self.type_comment_posonlyargs = type_comment_posonlyargs
 
-    assigned_stmts: AssignedStmtsCall["Arguments"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[Arguments]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -814,7 +778,7 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
             return name
         return None
 
-    @decorators.cachedproperty
+    @cached_property
     def fromlineno(self):
         """The first line that this node appears on in the source code.
 
@@ -823,12 +787,12 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
         lineno = super().fromlineno
         return max(lineno, self.parent.fromlineno or 0)
 
-    @decorators.cachedproperty
+    @cached_property
     def arguments(self):
         """Get all the arguments for this node, including positional only and positional and keyword"""
         return list(itertools.chain((self.posonlyargs or ()), self.args or ()))
 
-    def format_args(self):
+    def format_args(self, *, skippable_names: set[str] | None = None) -> str:
         """Get the arguments formatted as string.
 
         :returns: The formatted arguments.
@@ -848,6 +812,7 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
                     self.posonlyargs,
                     positional_only_defaults,
                     self.posonlyargs_annotations,
+                    skippable_names=skippable_names,
                 )
             )
             result.append("/")
@@ -857,6 +822,7 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
                     self.args,
                     positional_or_keyword_defaults,
                     getattr(self, "annotations", None),
+                    skippable_names=skippable_names,
                 )
             )
         if self.vararg:
@@ -866,12 +832,84 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
                 result.append("*")
             result.append(
                 _format_args(
-                    self.kwonlyargs, self.kw_defaults, self.kwonlyargs_annotations
+                    self.kwonlyargs,
+                    self.kw_defaults,
+                    self.kwonlyargs_annotations,
+                    skippable_names=skippable_names,
                 )
             )
         if self.kwarg:
             result.append(f"**{self.kwarg}")
         return ", ".join(result)
+
+    def _get_arguments_data(
+        self,
+    ) -> tuple[
+        dict[str, tuple[str | None, str | None]],
+        dict[str, tuple[str | None, str | None]],
+    ]:
+        """Get the arguments as dictionary with information about typing and defaults.
+
+        The return tuple contains a dictionary for positional and keyword arguments with their typing
+        and their default value, if any.
+        The method follows a similar order as format_args but instead of formatting into a string it
+        returns the data that is used to do so.
+        """
+        pos_only: dict[str, tuple[str | None, str | None]] = {}
+        kw_only: dict[str, tuple[str | None, str | None]] = {}
+
+        # Setup and match defaults with arguments
+        positional_only_defaults = []
+        positional_or_keyword_defaults = self.defaults
+        if self.defaults:
+            args = self.args or []
+            positional_or_keyword_defaults = self.defaults[-len(args) :]
+            positional_only_defaults = self.defaults[: len(self.defaults) - len(args)]
+
+        for index, posonly in enumerate(self.posonlyargs):
+            annotation, default = self.posonlyargs_annotations[index], None
+            if annotation is not None:
+                annotation = annotation.as_string()
+            if positional_only_defaults:
+                default = positional_only_defaults[index].as_string()
+            pos_only[posonly.name] = (annotation, default)
+
+        for index, arg in enumerate(self.args):
+            annotation, default = self.annotations[index], None
+            if annotation is not None:
+                annotation = annotation.as_string()
+            if positional_or_keyword_defaults:
+                defaults_offset = len(self.args) - len(positional_or_keyword_defaults)
+                default_index = index - defaults_offset
+                if (
+                    default_index > -1
+                    and positional_or_keyword_defaults[default_index] is not None
+                ):
+                    default = positional_or_keyword_defaults[default_index].as_string()
+            pos_only[arg.name] = (annotation, default)
+
+        if self.vararg:
+            annotation = self.varargannotation
+            if annotation is not None:
+                annotation = annotation.as_string()
+            pos_only[self.vararg] = (annotation, None)
+
+        for index, kwarg in enumerate(self.kwonlyargs):
+            annotation = self.kwonlyargs_annotations[index]
+            if annotation is not None:
+                annotation = annotation.as_string()
+            default = self.kw_defaults[index]
+            if default is not None:
+                default = default.as_string()
+            kw_only[kwarg.name] = (annotation, default)
+
+        if self.kwarg:
+            annotation = self.kwargannotation
+            if annotation is not None:
+                annotation = annotation.as_string()
+            kw_only[self.kwarg] = (annotation, None)
+
+        return pos_only, kw_only
 
     def default_value(self, argname):
         """Get the default value for an argument.
@@ -893,15 +931,13 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
             return self.kw_defaults[index]
         raise NoDefault(func=self.parent, name=argname)
 
-    def is_argument(self, name):
+    def is_argument(self, name) -> bool:
         """Check if the given name is defined in the arguments.
 
         :param name: The name to check for.
         :type name: str
 
-        :returns: True if the given name is defined in the arguments,
-            False otherwise.
-        :rtype: bool
+        :returns: Whether the given name is defined in the arguments,
         """
         if name == self.vararg:
             return True
@@ -939,7 +975,8 @@ class Arguments(mixins.AssignTypeMixin, NodeNG):
 
         yield from self.args or ()
 
-        yield from self.defaults
+        if self.defaults is not None:
+            yield from self.defaults
         yield from self.kwonlyargs
 
         for elt in self.kw_defaults:
@@ -973,7 +1010,11 @@ def _find_arg(argname, args, rec=False):
     return None, None
 
 
-def _format_args(args, defaults=None, annotations=None):
+def _format_args(
+    args, defaults=None, annotations=None, skippable_names: set[str] | None = None
+) -> str:
+    if skippable_names is None:
+        skippable_names = set()
     values = []
     if args is None:
         return ""
@@ -983,6 +1024,8 @@ def _format_args(args, defaults=None, annotations=None):
         default_offset = len(args) - len(defaults)
     packed = itertools.zip_longest(args, annotations)
     for i, (arg, annotation) in enumerate(packed):
+        if arg.name in skippable_names:
+            continue
         if isinstance(arg, Tuple):
             values.append(f"({_format_args(arg.elts)})")
         else:
@@ -999,7 +1042,7 @@ def _format_args(args, defaults=None, annotations=None):
     return ", ".join(values)
 
 
-class AssignAttr(mixins.ParentAssignTypeMixin, NodeNG):
+class AssignAttr(_base_nodes.ParentAssignNode):
     """Variation of :class:`ast.Assign` representing assignment to an attribute.
 
     >>> import astroid
@@ -1015,16 +1058,18 @@ class AssignAttr(mixins.ParentAssignTypeMixin, NodeNG):
     _astroid_fields = ("expr",)
     _other_fields = ("attrname",)
 
+    infer_lhs: ClassVar[InferLHS[AssignAttr]]
+
     @decorators.deprecate_default_argument_values(attrname="str")
     def __init__(
         self,
-        attrname: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        attrname: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param attrname: The name of the attribute being assigned to.
@@ -1041,10 +1086,10 @@ class AssignAttr(mixins.ParentAssignTypeMixin, NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.expr: Optional[NodeNG] = None
+        self.expr: NodeNG | None = None
         """What has the attribute that is being assigned to."""
 
-        self.attrname: Optional[str] = attrname
+        self.attrname: str | None = attrname
         """The name of the attribute being assigned to."""
 
         super().__init__(
@@ -1055,14 +1100,14 @@ class AssignAttr(mixins.ParentAssignTypeMixin, NodeNG):
             parent=parent,
         )
 
-    def postinit(self, expr: Optional[NodeNG] = None) -> None:
+    def postinit(self, expr: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param expr: What has the attribute that is being assigned to.
         """
         self.expr = expr
 
-    assigned_stmts: AssignedStmtsCall["AssignAttr"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[AssignAttr]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -1071,7 +1116,7 @@ class AssignAttr(mixins.ParentAssignTypeMixin, NodeNG):
         yield self.expr
 
 
-class Assert(Statement):
+class Assert(_base_nodes.Statement):
     """Class representing an :class:`ast.Assert` node.
 
     An :class:`Assert` node represents an assert statement.
@@ -1086,12 +1131,12 @@ class Assert(Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -1106,10 +1151,10 @@ class Assert(Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.test: Optional[NodeNG] = None
+        self.test: NodeNG | None = None
         """The test that passes or fails the assertion."""
 
-        self.fail: Optional[NodeNG] = None  # can be None
+        self.fail: NodeNG | None = None  # can be None
         """The message shown when the assertion fails."""
 
         super().__init__(
@@ -1120,9 +1165,7 @@ class Assert(Statement):
             parent=parent,
         )
 
-    def postinit(
-        self, test: Optional[NodeNG] = None, fail: Optional[NodeNG] = None
-    ) -> None:
+    def postinit(self, test: NodeNG | None = None, fail: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param test: The test that passes or fails the assertion.
@@ -1139,7 +1182,7 @@ class Assert(Statement):
             yield self.fail
 
 
-class Assign(mixins.AssignTypeMixin, Statement):
+class Assign(_base_nodes.AssignTypeNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Assign` node.
 
     An :class:`Assign` is a statement where something is explicitly
@@ -1156,12 +1199,12 @@ class Assign(mixins.AssignTypeMixin, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -1176,13 +1219,13 @@ class Assign(mixins.AssignTypeMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.targets: typing.List[NodeNG] = []
+        self.targets: list[NodeNG] = []
         """What is being assigned to."""
 
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """The value being assigned to the variables."""
 
-        self.type_annotation: Optional[NodeNG] = None  # can be None
+        self.type_annotation: NodeNG | None = None  # can be None
         """If present, this will contain the type annotation passed by a type comment"""
 
         super().__init__(
@@ -1195,9 +1238,9 @@ class Assign(mixins.AssignTypeMixin, Statement):
 
     def postinit(
         self,
-        targets: Optional[typing.List[NodeNG]] = None,
-        value: Optional[NodeNG] = None,
-        type_annotation: Optional[NodeNG] = None,
+        targets: list[NodeNG] | None = None,
+        value: NodeNG | None = None,
+        type_annotation: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1210,7 +1253,7 @@ class Assign(mixins.AssignTypeMixin, Statement):
         self.value = value
         self.type_annotation = type_annotation
 
-    assigned_stmts: AssignedStmtsCall["Assign"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[Assign]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -1228,7 +1271,7 @@ class Assign(mixins.AssignTypeMixin, Statement):
         yield from self.value._get_yield_nodes_skip_lambdas()
 
 
-class AnnAssign(mixins.AssignTypeMixin, Statement):
+class AnnAssign(_base_nodes.AssignTypeNode, _base_nodes.Statement):
     """Class representing an :class:`ast.AnnAssign` node.
 
     An :class:`AnnAssign` is an assignment with a type annotation.
@@ -1244,12 +1287,12 @@ class AnnAssign(mixins.AssignTypeMixin, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -1264,16 +1307,16 @@ class AnnAssign(mixins.AssignTypeMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.target: Optional[NodeNG] = None
+        self.target: NodeNG | None = None
         """What is being assigned to."""
 
-        self.annotation: Optional[NodeNG] = None
+        self.annotation: NodeNG | None = None
         """The type annotation of what is being assigned to."""
 
-        self.value: Optional[NodeNG] = None  # can be None
+        self.value: NodeNG | None = None  # can be None
         """The value being assigned to the variables."""
 
-        self.simple: Optional[int] = None
+        self.simple: int | None = None
         """Whether :attr:`target` is a pure name or a complex statement."""
 
         super().__init__(
@@ -1289,7 +1332,7 @@ class AnnAssign(mixins.AssignTypeMixin, Statement):
         target: NodeNG,
         annotation: NodeNG,
         simple: int,
-        value: Optional[NodeNG] = None,
+        value: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1307,7 +1350,7 @@ class AnnAssign(mixins.AssignTypeMixin, Statement):
         self.value = value
         self.simple = simple
 
-    assigned_stmts: AssignedStmtsCall["AnnAssign"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[AnnAssign]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -1320,7 +1363,7 @@ class AnnAssign(mixins.AssignTypeMixin, Statement):
             yield self.value
 
 
-class AugAssign(mixins.AssignTypeMixin, Statement):
+class AugAssign(_base_nodes.AssignTypeNode, _base_nodes.Statement):
     """Class representing an :class:`ast.AugAssign` node.
 
     An :class:`AugAssign` is an assignment paired with an operator.
@@ -1337,13 +1380,13 @@ class AugAssign(mixins.AssignTypeMixin, Statement):
     @decorators.deprecate_default_argument_values(op="str")
     def __init__(
         self,
-        op: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        op: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param op: The operator that is being combined with the assignment.
@@ -1361,16 +1404,16 @@ class AugAssign(mixins.AssignTypeMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.target: Optional[NodeNG] = None
+        self.target: NodeNG | None = None
         """What is being assigned to."""
 
-        self.op: Optional[str] = op
+        self.op: str | None = op
         """The operator that is being combined with the assignment.
 
         This includes the equals sign.
         """
 
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """The value being assigned to the variable."""
 
         super().__init__(
@@ -1382,7 +1425,7 @@ class AugAssign(mixins.AssignTypeMixin, Statement):
         )
 
     def postinit(
-        self, target: Optional[NodeNG] = None, value: Optional[NodeNG] = None
+        self, target: NodeNG | None = None, value: NodeNG | None = None
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1393,16 +1436,17 @@ class AugAssign(mixins.AssignTypeMixin, Statement):
         self.target = target
         self.value = value
 
-    assigned_stmts: AssignedStmtsCall["AugAssign"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[AugAssign]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
     # This is set by inference.py
-    def _infer_augassign(self, context=None):
-        raise NotImplementedError
+    _infer_augassign: ClassVar[
+        InferBinaryOperation[AugAssign, util.BadBinaryOperationMessage]
+    ]
 
-    def type_errors(self, context=None):
+    def type_errors(self, context: InferenceContext | None = None):
         """Get a list of type errors which can occur during inference.
 
         Each TypeError is represented by a :class:`BadBinaryOperationMessage` ,
@@ -1448,13 +1492,13 @@ class BinOp(NodeNG):
     @decorators.deprecate_default_argument_values(op="str")
     def __init__(
         self,
-        op: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        op: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param op: The operator.
@@ -1471,13 +1515,13 @@ class BinOp(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.left: Optional[NodeNG] = None
+        self.left: NodeNG | None = None
         """What is being applied to the operator on the left side."""
 
-        self.op: Optional[str] = op
+        self.op: str | None = op
         """The operator."""
 
-        self.right: Optional[NodeNG] = None
+        self.right: NodeNG | None = None
         """What is being applied to the operator on the right side."""
 
         super().__init__(
@@ -1488,9 +1532,7 @@ class BinOp(NodeNG):
             parent=parent,
         )
 
-    def postinit(
-        self, left: Optional[NodeNG] = None, right: Optional[NodeNG] = None
-    ) -> None:
+    def postinit(self, left: NodeNG | None = None, right: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param left: What is being applied to the operator on the left side.
@@ -1501,10 +1543,9 @@ class BinOp(NodeNG):
         self.right = right
 
     # This is set by inference.py
-    def _infer_binop(self, context=None):
-        raise NotImplementedError
+    _infer_binop: ClassVar[InferBinaryOperation[BinOp, util.BadBinaryOperationMessage]]
 
-    def type_errors(self, context=None):
+    def type_errors(self, context: InferenceContext | None = None):
         """Get a list of type errors which can occur during inference.
 
         Each TypeError is represented by a :class:`BadBinaryOperationMessage`,
@@ -1530,7 +1571,7 @@ class BinOp(NodeNG):
     def op_precedence(self):
         return OP_PRECEDENCE[self.op]
 
-    def op_left_associative(self):
+    def op_left_associative(self) -> bool:
         # 2**3**4 == 2**(3**4)
         return self.op != "**"
 
@@ -1552,13 +1593,13 @@ class BoolOp(NodeNG):
     @decorators.deprecate_default_argument_values(op="str")
     def __init__(
         self,
-        op: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        op: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param op: The operator.
@@ -1575,10 +1616,10 @@ class BoolOp(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.op: Optional[str] = op
+        self.op: str | None = op
         """The operator."""
 
-        self.values: typing.List[NodeNG] = []
+        self.values: list[NodeNG] = []
         """The values being applied to the operator."""
 
         super().__init__(
@@ -1589,7 +1630,7 @@ class BoolOp(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, values: Optional[typing.List[NodeNG]] = None) -> None:
+    def postinit(self, values: list[NodeNG] | None = None) -> None:
         """Do some setup after initialisation.
 
         :param values: The values being applied to the operator.
@@ -1604,7 +1645,7 @@ class BoolOp(NodeNG):
         return OP_PRECEDENCE[self.op]
 
 
-class Break(mixins.NoChildrenMixin, Statement):
+class Break(_base_nodes.NoChildrenNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Break` node.
 
     >>> import astroid
@@ -1629,12 +1670,12 @@ class Call(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -1649,13 +1690,13 @@ class Call(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.func: Optional[NodeNG] = None
+        self.func: NodeNG | None = None
         """What is being called."""
 
-        self.args: typing.List[NodeNG] = []
+        self.args: list[NodeNG] = []
         """The positional arguments being given to the call."""
 
-        self.keywords: typing.List["Keyword"] = []
+        self.keywords: list[Keyword] = []
         """The keyword arguments being given to the call."""
 
         super().__init__(
@@ -1668,9 +1709,9 @@ class Call(NodeNG):
 
     def postinit(
         self,
-        func: Optional[NodeNG] = None,
-        args: Optional[typing.List[NodeNG]] = None,
-        keywords: Optional[typing.List["Keyword"]] = None,
+        func: NodeNG | None = None,
+        args: list[NodeNG] | None = None,
+        keywords: list[Keyword] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1687,12 +1728,12 @@ class Call(NodeNG):
             self.keywords = keywords
 
     @property
-    def starargs(self) -> typing.List["Starred"]:
+    def starargs(self) -> list[Starred]:
         """The positional arguments that unpack something."""
         return [arg for arg in self.args if isinstance(arg, Starred)]
 
     @property
-    def kwargs(self) -> typing.List["Keyword"]:
+    def kwargs(self) -> list[Keyword]:
         """The keyword arguments that unpack something."""
         return [keyword for keyword in self.keywords if keyword.arg is None]
 
@@ -1721,12 +1762,12 @@ class Compare(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -1741,10 +1782,10 @@ class Compare(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.left: Optional[NodeNG] = None
+        self.left: NodeNG | None = None
         """The value at the left being applied to a comparison operator."""
 
-        self.ops: typing.List[typing.Tuple[str, NodeNG]] = []
+        self.ops: list[tuple[str, NodeNG]] = []
         """The remainder of the operators and their relevant right hand value."""
 
         super().__init__(
@@ -1757,8 +1798,8 @@ class Compare(NodeNG):
 
     def postinit(
         self,
-        left: Optional[NodeNG] = None,
-        ops: Optional[typing.List[typing.Tuple[str, NodeNG]]] = None,
+        left: NodeNG | None = None,
+        ops: list[tuple[str, NodeNG]] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1821,20 +1862,20 @@ class Comprehension(NodeNG):
     end_lineno: None
     end_col_offset: None
 
-    def __init__(self, parent: Optional[NodeNG] = None) -> None:
+    def __init__(self, parent: NodeNG | None = None) -> None:
         """
         :param parent: The parent node in the syntax tree.
         """
-        self.target: Optional[NodeNG] = None
+        self.target: NodeNG | None = None
         """What is assigned to by the comprehension."""
 
-        self.iter: Optional[NodeNG] = None
+        self.iter: NodeNG | None = None
         """What is iterated over by the comprehension."""
 
-        self.ifs: typing.List[NodeNG] = []
+        self.ifs: list[NodeNG] = []
         """The contents of any if statements that filter the comprehension."""
 
-        self.is_async: Optional[bool] = None
+        self.is_async: bool | None = None
         """Whether this is an asynchronous comprehension or not."""
 
         super().__init__(parent=parent)
@@ -1842,10 +1883,10 @@ class Comprehension(NodeNG):
     # pylint: disable=redefined-builtin; same name as builtin ast module.
     def postinit(
         self,
-        target: Optional[NodeNG] = None,
-        iter: Optional[NodeNG] = None,
-        ifs: Optional[typing.List[NodeNG]] = None,
-        is_async: Optional[bool] = None,
+        target: NodeNG | None = None,
+        iter: NodeNG | None = None,
+        ifs: list[NodeNG] | None = None,
+        is_async: bool | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -1864,7 +1905,7 @@ class Comprehension(NodeNG):
             self.ifs = ifs
         self.is_async = is_async
 
-    assigned_stmts: AssignedStmtsCall["Comprehension"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[Comprehension]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -1878,7 +1919,7 @@ class Comprehension(NodeNG):
         return self
 
     def _get_filtered_stmts(
-        self, lookup_node, node, stmts, mystmt: Optional[Statement]
+        self, lookup_node, node, stmts, mystmt: _base_nodes.Statement | None
     ):
         """method used in filter_stmts"""
         if self is mystmt:
@@ -1900,7 +1941,7 @@ class Comprehension(NodeNG):
         yield from self.ifs
 
 
-class Const(mixins.NoChildrenMixin, NodeNG, Instance):
+class Const(_base_nodes.NoChildrenNode, Instance):
     """Class representing any constant including num, str, bool, None, bytes.
 
     >>> import astroid
@@ -1919,14 +1960,14 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
 
     def __init__(
         self,
-        value: typing.Any,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
-        kind: Optional[str] = None,
+        value: Any,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
+        kind: str | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param value: The value that the constant represents.
@@ -1945,10 +1986,10 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: typing.Any = value
+        self.value: Any = value
         """The value that the constant represents."""
 
-        self.kind: Optional[str] = kind  # can be None
+        self.kind: str | None = kind  # can be None
         """"The string prefix. "u" for u-prefixed strings and ``None`` otherwise. Python 3.8+ only."""
 
         super().__init__(
@@ -1958,6 +1999,11 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
             end_col_offset=end_col_offset,
             parent=parent,
         )
+
+        Instance.__init__(self, None)
+
+    infer_unary_op: ClassVar[InferUnaryOp[Const]]
+    infer_binary_op: ClassVar[InferBinaryOp[Const]]
 
     def __getattr__(self, name):
         # This is needed because of Proxy's __getattr__ method.
@@ -1970,7 +2016,7 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
             raise AttributeError
         return super().__getattr__(name)
 
-    def getitem(self, index, context=None):
+    def getitem(self, index, context: InferenceContext | None = None):
         """Get an item from this node if subscriptable.
 
         :param index: The node to use as a subscript index.
@@ -1992,6 +2038,10 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
         try:
             if isinstance(self.value, (str, bytes)):
                 return Const(self.value[index_value])
+        except ValueError as exc:
+            raise AstroidValueError(
+                f"Could not index {self.value!r} with {index_value!r}"
+            ) from exc
         except IndexError as exc:
             raise AstroidIndexError(
                 message="Index {index!r} out of range",
@@ -2006,13 +2056,11 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
 
         raise AstroidTypeError(f"{self!r} (value={self.value})")
 
-    def has_dynamic_getattr(self):
+    def has_dynamic_getattr(self) -> bool:
         """Check if the node has a custom __getattr__ or __getattribute__.
 
-        :returns: True if the class has a custom
-            __getattr__ or __getattribute__, False otherwise.
+        :returns: Whether the class has a custom __getattr__ or __getattribute__.
             For a :class:`Const` this is always ``False``.
-        :rtype: bool
         """
         return False
 
@@ -2028,15 +2076,14 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
             return [const_factory(elem) for elem in self.value]
         raise TypeError(f"Cannot iterate over type {type(self.value)!r}")
 
-    def pytype(self):
+    def pytype(self) -> str:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return self._proxied.qname()
 
-    def bool_value(self, context=None):
+    def bool_value(self, context: InferenceContext | None = None):
         """Determine the boolean value of this node.
 
         :returns: The boolean value of this node.
@@ -2045,7 +2092,7 @@ class Const(mixins.NoChildrenMixin, NodeNG, Instance):
         return bool(self.value)
 
 
-class Continue(mixins.NoChildrenMixin, Statement):
+class Continue(_base_nodes.NoChildrenNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Continue` node.
 
     >>> import astroid
@@ -2077,12 +2124,12 @@ class Decorators(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2097,7 +2144,7 @@ class Decorators(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.nodes: typing.List[NodeNG]
+        self.nodes: list[NodeNG]
         """The decorators that this node contains.
 
         :type: list(Name or Call) or None
@@ -2111,7 +2158,7 @@ class Decorators(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, nodes: typing.List[NodeNG]) -> None:
+    def postinit(self, nodes: list[NodeNG]) -> None:
         """Do some setup after initialisation.
 
         :param nodes: The decorators that this node contains.
@@ -2119,7 +2166,7 @@ class Decorators(NodeNG):
         """
         self.nodes = nodes
 
-    def scope(self) -> "LocalsDictNodeNG":
+    def scope(self) -> LocalsDictNodeNG:
         """The first parent node defining a new scope.
         These can be Module, FunctionDef, ClassDef, Lambda, or GeneratorExp nodes.
 
@@ -2136,7 +2183,7 @@ class Decorators(NodeNG):
         yield from self.nodes
 
 
-class DelAttr(mixins.ParentAssignTypeMixin, NodeNG):
+class DelAttr(_base_nodes.ParentAssignNode):
     """Variation of :class:`ast.Delete` representing deletion of an attribute.
 
     >>> import astroid
@@ -2153,13 +2200,13 @@ class DelAttr(mixins.ParentAssignTypeMixin, NodeNG):
     @decorators.deprecate_default_argument_values(attrname="str")
     def __init__(
         self,
-        attrname: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        attrname: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param attrname: The name of the attribute that is being deleted.
@@ -2176,13 +2223,13 @@ class DelAttr(mixins.ParentAssignTypeMixin, NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.expr: Optional[NodeNG] = None
+        self.expr: NodeNG | None = None
         """The name that this node represents.
 
         :type: Name or None
         """
 
-        self.attrname: Optional[str] = attrname
+        self.attrname: str | None = attrname
         """The name of the attribute that is being deleted."""
 
         super().__init__(
@@ -2193,7 +2240,7 @@ class DelAttr(mixins.ParentAssignTypeMixin, NodeNG):
             parent=parent,
         )
 
-    def postinit(self, expr: Optional[NodeNG] = None) -> None:
+    def postinit(self, expr: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param expr: The name that this node represents.
@@ -2205,7 +2252,7 @@ class DelAttr(mixins.ParentAssignTypeMixin, NodeNG):
         yield self.expr
 
 
-class Delete(mixins.AssignTypeMixin, Statement):
+class Delete(_base_nodes.AssignTypeNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Delete` node.
 
     A :class:`Delete` is a ``del`` statement this is deleting something.
@@ -2220,12 +2267,12 @@ class Delete(mixins.AssignTypeMixin, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2240,7 +2287,7 @@ class Delete(mixins.AssignTypeMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.targets: typing.List[NodeNG] = []
+        self.targets: list[NodeNG] = []
         """What is being deleted."""
 
         super().__init__(
@@ -2251,7 +2298,7 @@ class Delete(mixins.AssignTypeMixin, Statement):
             parent=parent,
         )
 
-    def postinit(self, targets: Optional[typing.List[NodeNG]] = None) -> None:
+    def postinit(self, targets: list[NodeNG] | None = None) -> None:
         """Do some setup after initialisation.
 
         :param targets: What is being deleted.
@@ -2278,12 +2325,12 @@ class Dict(NodeNG, Instance):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2298,7 +2345,9 @@ class Dict(NodeNG, Instance):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.items: typing.List[typing.Tuple[NodeNG, NodeNG]] = []
+        self.items: list[
+            tuple[SuccessfulInferenceResult, SuccessfulInferenceResult]
+        ] = []
         """The key-value pairs contained in the dictionary."""
 
         super().__init__(
@@ -2309,12 +2358,16 @@ class Dict(NodeNG, Instance):
             parent=parent,
         )
 
-    def postinit(self, items: typing.List[typing.Tuple[NodeNG, NodeNG]]) -> None:
+    def postinit(
+        self, items: list[tuple[SuccessfulInferenceResult, SuccessfulInferenceResult]]
+    ) -> None:
         """Do some setup after initialisation.
 
         :param items: The key-value pairs contained in the dictionary.
         """
         self.items = items
+
+    infer_unary_op: ClassVar[InferUnaryOp[Dict]]
 
     @classmethod
     def from_elements(cls, items=None):
@@ -2338,11 +2391,10 @@ class Dict(NodeNG, Instance):
             ]
         return node
 
-    def pytype(self):
+    def pytype(self) -> Literal["builtins.dict"]:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return "builtins.dict"
 
@@ -2377,24 +2429,33 @@ class Dict(NodeNG, Instance):
         """
         return [key for (key, _) in self.items]
 
-    def getitem(self, index, context=None):
+    def getitem(
+        self, index: Const | Slice, context: InferenceContext | None = None
+    ) -> NodeNG:
         """Get an item from this node.
 
         :param index: The node to use as a subscript index.
-        :type index: Const or Slice
 
         :raises AstroidTypeError: When the given index cannot be used as a
             subscript index, or if this node is not subscriptable.
         :raises AstroidIndexError: If the given index does not exist in the
             dictionary.
         """
+        # pylint: disable-next=import-outside-toplevel; circular import
+        from astroid.helpers import safe_infer
+
         for key, value in self.items:
             # TODO(cpopa): no support for overriding yet, {1:2, **{1: 3}}.
             if isinstance(key, DictUnpack):
+                inferred_value = safe_infer(value, context)
+                if not isinstance(inferred_value, Dict):
+                    continue
+
                 try:
-                    return value.getitem(index, context)
+                    return inferred_value.getitem(index, context)
                 except (AstroidTypeError, AstroidIndexError):
                     continue
+
             for inferredkey in key.infer(context):
                 if inferredkey is util.Uninferable:
                     continue
@@ -2404,7 +2465,7 @@ class Dict(NodeNG, Instance):
 
         raise AstroidIndexError(index)
 
-    def bool_value(self, context=None):
+    def bool_value(self, context: InferenceContext | None = None):
         """Determine the boolean value of this node.
 
         :returns: The boolean value of this node.
@@ -2413,7 +2474,7 @@ class Dict(NodeNG, Instance):
         return bool(self.items)
 
 
-class Expr(Statement):
+class Expr(_base_nodes.Statement):
     """Class representing an :class:`ast.Expr` node.
 
     An :class:`Expr` is any expression that does not have its value used or
@@ -2431,12 +2492,12 @@ class Expr(Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2451,7 +2512,7 @@ class Expr(Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """What the expression does."""
 
         super().__init__(
@@ -2462,7 +2523,7 @@ class Expr(Statement):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: What the expression does.
@@ -2477,7 +2538,7 @@ class Expr(Statement):
             yield from self.value._get_yield_nodes_skip_lambdas()
 
 
-class Ellipsis(mixins.NoChildrenMixin, NodeNG):  # pylint: disable=redefined-builtin
+class Ellipsis(_base_nodes.NoChildrenNode):  # pylint: disable=redefined-builtin
     """Class representing an :class:`ast.Ellipsis` node.
 
     An :class:`Ellipsis` is the ``...`` syntax.
@@ -2487,13 +2548,18 @@ class Ellipsis(mixins.NoChildrenMixin, NodeNG):  # pylint: disable=redefined-bui
     """
 
 
-class EmptyNode(mixins.NoChildrenMixin, NodeNG):
+class EmptyNode(_base_nodes.NoChildrenNode):
     """Holds an arbitrary object in the :attr:`LocalsDictNodeNG.locals`."""
 
     object = None
 
+    def has_underlying_object(self) -> bool:
+        return self.object is not None and self.object is not _EMPTY_OBJECT_MARKER
 
-class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statement):
+
+class ExceptHandler(
+    _base_nodes.MultiLineBlockNode, _base_nodes.AssignTypeNode, _base_nodes.Statement
+):
     """Class representing an :class:`ast.ExceptHandler`. node.
 
     An :class:`ExceptHandler` is an ``except`` block on a try-except.
@@ -2516,12 +2582,12 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2536,16 +2602,16 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.type: Optional[NodeNG] = None  # can be None
+        self.type: NodeNG | None = None  # can be None
         """The types that the block handles.
 
         :type: Tuple or NodeNG or None
         """
 
-        self.name: Optional[AssignName] = None  # can be None
+        self.name: AssignName | None = None  # can be None
         """The name that the caught exception is assigned to."""
 
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the block."""
 
         super().__init__(
@@ -2556,7 +2622,7 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
             parent=parent,
         )
 
-    assigned_stmts: AssignedStmtsCall["ExceptHandler"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[ExceptHandler]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -2573,9 +2639,9 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
     # pylint: disable=redefined-builtin; had to use the same name as builtin ast module.
     def postinit(
         self,
-        type: Optional[NodeNG] = None,
-        name: Optional[AssignName] = None,
-        body: Optional[typing.List[NodeNG]] = None,
+        type: NodeNG | None = None,
+        name: AssignName | None = None,
+        body: list[NodeNG] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -2591,7 +2657,7 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
         if body is not None:
             self.body = body
 
-    @decorators.cachedproperty
+    @cached_property
     def blockstart_tolineno(self):
         """The line on which the beginning of this block ends.
 
@@ -2603,7 +2669,7 @@ class ExceptHandler(mixins.MultiLineBlockMixin, mixins.AssignTypeMixin, Statemen
             return self.type.tolineno
         return self.lineno
 
-    def catch(self, exceptions: Optional[typing.List[str]]) -> bool:
+    def catch(self, exceptions: list[str] | None) -> bool:
         """Check if this node handles any of the given
 
         :param exceptions: The names of the exceptions to check for.
@@ -2624,10 +2690,9 @@ class ExtSlice(NodeNG):
 
 
 class For(
-    mixins.MultiLineBlockMixin,
-    mixins.BlockRangeMixIn,
-    mixins.AssignTypeMixin,
-    Statement,
+    _base_nodes.MultiLineWithElseBlockNode,
+    _base_nodes.AssignTypeNode,
+    _base_nodes.Statement,
 ):
     """Class representing an :class:`ast.For` node.
 
@@ -2649,12 +2714,12 @@ class For(
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2669,19 +2734,19 @@ class For(
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.target: Optional[NodeNG] = None
+        self.target: NodeNG | None = None
         """What the loop assigns to."""
 
-        self.iter: Optional[NodeNG] = None
+        self.iter: NodeNG | None = None
         """What the loop iterates over."""
 
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the body of the loop."""
 
-        self.orelse: typing.List[NodeNG] = []
+        self.orelse: list[NodeNG] = []
         """The contents of the ``else`` block of the loop."""
 
-        self.type_annotation: Optional[NodeNG] = None  # can be None
+        self.type_annotation: NodeNG | None = None  # can be None
         """If present, this will contain the type annotation passed by a type comment"""
 
         super().__init__(
@@ -2695,11 +2760,11 @@ class For(
     # pylint: disable=redefined-builtin; had to use the same name as builtin ast module.
     def postinit(
         self,
-        target: Optional[NodeNG] = None,
-        iter: Optional[NodeNG] = None,
-        body: Optional[typing.List[NodeNG]] = None,
-        orelse: Optional[typing.List[NodeNG]] = None,
-        type_annotation: Optional[NodeNG] = None,
+        target: NodeNG | None = None,
+        iter: NodeNG | None = None,
+        body: list[NodeNG] | None = None,
+        orelse: list[NodeNG] | None = None,
+        type_annotation: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -2719,12 +2784,12 @@ class For(
             self.orelse = orelse
         self.type_annotation = type_annotation
 
-    assigned_stmts: AssignedStmtsCall["For"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[For]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
-    @decorators.cachedproperty
+    @cached_property
     def blockstart_tolineno(self):
         """The line on which the beginning of this block ends.
 
@@ -2781,12 +2846,12 @@ class Await(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -2801,7 +2866,7 @@ class Await(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """What to wait for."""
 
         super().__init__(
@@ -2812,7 +2877,7 @@ class Await(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: What to wait for.
@@ -2823,7 +2888,7 @@ class Await(NodeNG):
         yield self.value
 
 
-class ImportFrom(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
+class ImportFrom(_base_nodes.ImportNode):
     """Class representing an :class:`ast.ImportFrom` node.
 
     >>> import astroid
@@ -2836,15 +2901,15 @@ class ImportFrom(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
 
     def __init__(
         self,
-        fromname: Optional[str],
-        names: typing.List[typing.Tuple[str, Optional[str]]],
-        level: Optional[int] = 0,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        fromname: str | None,
+        names: list[tuple[str, str | None]],
+        level: int | None = 0,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param fromname: The module that is being imported from.
@@ -2865,13 +2930,13 @@ class ImportFrom(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.modname: Optional[str] = fromname  # can be None
+        self.modname: str | None = fromname  # can be None
         """The module that is being imported from.
 
         This is ``None`` for relative imports.
         """
 
-        self.names: typing.List[typing.Tuple[str, Optional[str]]] = names
+        self.names: list[tuple[str, str | None]] = names
         """What is being imported from the module.
 
         Each entry is a :class:`tuple` of the name being imported,
@@ -2879,7 +2944,7 @@ class ImportFrom(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
         """
 
         # TODO When is 'level' None?
-        self.level: Optional[int] = level  # can be None
+        self.level: int | None = level  # can be None
         """The level of relative import.
 
         Essentially this is the number of dots in the import.
@@ -2904,13 +2969,13 @@ class Attribute(NodeNG):
     @decorators.deprecate_default_argument_values(attrname="str")
     def __init__(
         self,
-        attrname: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        attrname: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param attrname: The name of the attribute.
@@ -2927,13 +2992,13 @@ class Attribute(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.expr: Optional[NodeNG] = None
+        self.expr: NodeNG | None = None
         """The name that this node represents.
 
         :type: Name or None
         """
 
-        self.attrname: Optional[str] = attrname
+        self.attrname: str | None = attrname
         """The name of the attribute."""
 
         super().__init__(
@@ -2944,7 +3009,7 @@ class Attribute(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, expr: Optional[NodeNG] = None) -> None:
+    def postinit(self, expr: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param expr: The name that this node represents.
@@ -2956,7 +3021,7 @@ class Attribute(NodeNG):
         yield self.expr
 
 
-class Global(mixins.NoChildrenMixin, Statement):
+class Global(_base_nodes.NoChildrenNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Global` node.
 
     >>> import astroid
@@ -2969,13 +3034,13 @@ class Global(mixins.NoChildrenMixin, Statement):
 
     def __init__(
         self,
-        names: typing.List[str],
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        names: list[str],
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param names: The names being declared as global.
@@ -2992,7 +3057,7 @@ class Global(mixins.NoChildrenMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.names: typing.List[str] = names
+        self.names: list[str] = names
         """The names being declared as global."""
 
         super().__init__(
@@ -3007,7 +3072,7 @@ class Global(mixins.NoChildrenMixin, Statement):
         return name
 
 
-class If(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
+class If(_base_nodes.MultiLineWithElseBlockNode, _base_nodes.Statement):
     """Class representing an :class:`ast.If` node.
 
     >>> import astroid
@@ -3021,12 +3086,12 @@ class If(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3041,13 +3106,13 @@ class If(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.test: Optional[NodeNG] = None
+        self.test: NodeNG | None = None
         """The condition that the statement tests."""
 
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the block."""
 
-        self.orelse: typing.List[NodeNG] = []
+        self.orelse: list[NodeNG] = []
         """The contents of the ``else`` block."""
 
         self.is_orelse: bool = False
@@ -3063,9 +3128,9 @@ class If(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def postinit(
         self,
-        test: Optional[NodeNG] = None,
-        body: Optional[typing.List[NodeNG]] = None,
-        orelse: Optional[typing.List[NodeNG]] = None,
+        test: NodeNG | None = None,
+        body: list[NodeNG] | None = None,
+        orelse: list[NodeNG] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -3083,7 +3148,7 @@ class If(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         if isinstance(self.parent, If) and self in self.parent.orelse:
             self.is_orelse = True
 
-    @decorators.cachedproperty
+    @cached_property
     def blockstart_tolineno(self):
         """The line on which the beginning of this block ends.
 
@@ -3185,12 +3250,12 @@ class IfExp(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3205,13 +3270,13 @@ class IfExp(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.test: Optional[NodeNG] = None
+        self.test: NodeNG | None = None
         """The condition that the statement tests."""
 
-        self.body: Optional[NodeNG] = None
+        self.body: NodeNG | None = None
         """The contents of the block."""
 
-        self.orelse: Optional[NodeNG] = None
+        self.orelse: NodeNG | None = None
         """The contents of the ``else`` block."""
 
         super().__init__(
@@ -3224,9 +3289,9 @@ class IfExp(NodeNG):
 
     def postinit(
         self,
-        test: Optional[NodeNG] = None,
-        body: Optional[NodeNG] = None,
-        orelse: Optional[NodeNG] = None,
+        test: NodeNG | None = None,
+        body: NodeNG | None = None,
+        orelse: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -3245,13 +3310,13 @@ class IfExp(NodeNG):
         yield self.body
         yield self.orelse
 
-    def op_left_associative(self):
+    def op_left_associative(self) -> Literal[False]:
         # `1 if True else 2 if False else 3` is parsed as
         # `1 if True else (2 if False else 3)`
         return False
 
 
-class Import(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
+class Import(_base_nodes.ImportNode):
     """Class representing an :class:`ast.Import` node.
     >>> import astroid
     >>> node = astroid.extract_node('import astroid')
@@ -3264,13 +3329,13 @@ class Import(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
     @decorators.deprecate_default_argument_values(names="list[tuple[str, str | None]]")
     def __init__(
         self,
-        names: Optional[typing.List[typing.Tuple[str, Optional[str]]]] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        names: list[tuple[str, str | None]] | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param names: The names being imported.
@@ -3287,7 +3352,7 @@ class Import(mixins.NoChildrenMixin, mixins.ImportFromMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.names: typing.List[typing.Tuple[str, Optional[str]]] = names or []
+        self.names: list[tuple[str, str | None]] = names or []
         """The names being imported.
 
         Each entry is a :class:`tuple` of the name being imported,
@@ -3329,13 +3394,13 @@ class Keyword(NodeNG):
 
     def __init__(
         self,
-        arg: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        arg: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param arg: The argument being assigned to.
@@ -3352,10 +3417,10 @@ class Keyword(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.arg: Optional[str] = arg  # can be None
+        self.arg: str | None = arg  # can be None
         """The argument being assigned to."""
 
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """The value being assigned to the keyword argument."""
 
         super().__init__(
@@ -3366,7 +3431,7 @@ class Keyword(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: The value being assigned to the keyword argument.
@@ -3390,13 +3455,13 @@ class List(BaseContainer):
 
     def __init__(
         self,
-        ctx: Optional[Context] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        ctx: Context | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param ctx: Whether the list is assigned to or loaded from.
@@ -3413,7 +3478,7 @@ class List(BaseContainer):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.ctx: Optional[Context] = ctx
+        self.ctx: Context | None = ctx
         """Whether the list is assigned to or loaded from."""
 
         super().__init__(
@@ -3424,20 +3489,22 @@ class List(BaseContainer):
             parent=parent,
         )
 
-    assigned_stmts: AssignedStmtsCall["List"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[List]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
-    def pytype(self):
+    infer_unary_op: ClassVar[InferUnaryOp[List]]
+    infer_binary_op: ClassVar[InferBinaryOp[List]]
+
+    def pytype(self) -> Literal["builtins.list"]:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return "builtins.list"
 
-    def getitem(self, index, context=None):
+    def getitem(self, index, context: InferenceContext | None = None):
         """Get an item from this node.
 
         :param index: The node to use as a subscript index.
@@ -3446,7 +3513,7 @@ class List(BaseContainer):
         return _container_getitem(self, self.elts, index, context=context)
 
 
-class Nonlocal(mixins.NoChildrenMixin, Statement):
+class Nonlocal(_base_nodes.NoChildrenNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Nonlocal` node.
 
     >>> import astroid
@@ -3464,13 +3531,13 @@ class Nonlocal(mixins.NoChildrenMixin, Statement):
 
     def __init__(
         self,
-        names: typing.List[str],
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        names: list[str],
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param names: The names being declared as not local.
@@ -3487,7 +3554,7 @@ class Nonlocal(mixins.NoChildrenMixin, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.names: typing.List[str] = names
+        self.names: list[str] = names
         """The names being declared as not local."""
 
         super().__init__(
@@ -3502,7 +3569,7 @@ class Nonlocal(mixins.NoChildrenMixin, Statement):
         return name
 
 
-class Pass(mixins.NoChildrenMixin, Statement):
+class Pass(_base_nodes.NoChildrenNode, _base_nodes.Statement):
     """Class representing an :class:`ast.Pass` node.
 
     >>> import astroid
@@ -3512,7 +3579,7 @@ class Pass(mixins.NoChildrenMixin, Statement):
     """
 
 
-class Raise(Statement):
+class Raise(_base_nodes.Statement):
     """Class representing an :class:`ast.Raise` node.
 
     >>> import astroid
@@ -3525,12 +3592,12 @@ class Raise(Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3545,10 +3612,10 @@ class Raise(Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.exc: Optional[NodeNG] = None  # can be None
+        self.exc: NodeNG | None = None  # can be None
         """What is being raised."""
 
-        self.cause: Optional[NodeNG] = None  # can be None
+        self.cause: NodeNG | None = None  # can be None
         """The exception being used to raise this one."""
 
         super().__init__(
@@ -3561,8 +3628,8 @@ class Raise(Statement):
 
     def postinit(
         self,
-        exc: Optional[NodeNG] = None,
-        cause: Optional[NodeNG] = None,
+        exc: NodeNG | None = None,
+        cause: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -3573,12 +3640,10 @@ class Raise(Statement):
         self.exc = exc
         self.cause = cause
 
-    def raises_not_implemented(self):
+    def raises_not_implemented(self) -> bool:
         """Check if this node raises a :class:`NotImplementedError`.
 
-        :returns: True if this node raises a :class:`NotImplementedError`,
-            False otherwise.
-        :rtype: bool
+        :returns: Whether this node raises a :class:`NotImplementedError`.
         """
         if not self.exc:
             return False
@@ -3594,7 +3659,7 @@ class Raise(Statement):
             yield self.cause
 
 
-class Return(Statement):
+class Return(_base_nodes.Statement):
     """Class representing an :class:`ast.Return` node.
 
     >>> import astroid
@@ -3607,12 +3672,12 @@ class Return(Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3627,7 +3692,7 @@ class Return(Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None  # can be None
+        self.value: NodeNG | None = None  # can be None
         """The value being returned."""
 
         super().__init__(
@@ -3638,7 +3703,7 @@ class Return(Statement):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: The value being returned.
@@ -3665,11 +3730,12 @@ class Set(BaseContainer):
     <Set.set l.1 at 0x7f23b2e71d68>
     """
 
-    def pytype(self):
+    infer_unary_op: ClassVar[InferUnaryOp[Set]]
+
+    def pytype(self) -> Literal["builtins.set"]:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return "builtins.set"
 
@@ -3689,12 +3755,12 @@ class Slice(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3709,13 +3775,13 @@ class Slice(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.lower: Optional[NodeNG] = None  # can be None
+        self.lower: NodeNG | None = None  # can be None
         """The lower index in the slice."""
 
-        self.upper: Optional[NodeNG] = None  # can be None
+        self.upper: NodeNG | None = None  # can be None
         """The upper index in the slice."""
 
-        self.step: Optional[NodeNG] = None  # can be None
+        self.step: NodeNG | None = None  # can be None
         """The step to take between indexes."""
 
         super().__init__(
@@ -3728,9 +3794,9 @@ class Slice(NodeNG):
 
     def postinit(
         self,
-        lower: Optional[NodeNG] = None,
-        upper: Optional[NodeNG] = None,
-        step: Optional[NodeNG] = None,
+        lower: NodeNG | None = None,
+        upper: NodeNG | None = None,
+        step: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -3752,20 +3818,19 @@ class Slice(NodeNG):
             return const
         return attr
 
-    @decorators.cachedproperty
-    def _proxied(self):
+    @cached_property
+    def _proxied(self) -> nodes.ClassDef:
         builtins = AstroidManager().builtins_module
         return builtins.getattr("slice")[0]
 
-    def pytype(self):
+    def pytype(self) -> Literal["builtins.slice"]:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return "builtins.slice"
 
-    def igetattr(self, attrname, context=None):
+    def igetattr(self, attrname, context: InferenceContext | None = None):
         """Infer the possible values of the given attribute on the slice.
 
         :param attrname: The name of the attribute to infer.
@@ -3783,7 +3848,7 @@ class Slice(NodeNG):
         else:
             yield from self.getattr(attrname, context=context)
 
-    def getattr(self, attrname, context=None):
+    def getattr(self, attrname, context: InferenceContext | None = None):
         return self._proxied.getattr(attrname, context)
 
     def get_children(self):
@@ -3797,7 +3862,7 @@ class Slice(NodeNG):
             yield self.step
 
 
-class Starred(mixins.ParentAssignTypeMixin, NodeNG):
+class Starred(_base_nodes.ParentAssignNode):
     """Class representing an :class:`ast.Starred` node.
 
     >>> import astroid
@@ -3811,13 +3876,13 @@ class Starred(mixins.ParentAssignTypeMixin, NodeNG):
 
     def __init__(
         self,
-        ctx: Optional[Context] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        ctx: Context | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param ctx: Whether the list is assigned to or loaded from.
@@ -3834,10 +3899,10 @@ class Starred(mixins.ParentAssignTypeMixin, NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """What is being unpacked."""
 
-        self.ctx: Optional[Context] = ctx
+        self.ctx: Context | None = ctx
         """Whether the starred item is assigned to or loaded from."""
 
         super().__init__(
@@ -3848,14 +3913,14 @@ class Starred(mixins.ParentAssignTypeMixin, NodeNG):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: What is being unpacked.
         """
         self.value = value
 
-    assigned_stmts: AssignedStmtsCall["Starred"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[Starred]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
@@ -3876,15 +3941,17 @@ class Subscript(NodeNG):
     _astroid_fields = ("value", "slice")
     _other_fields = ("ctx",)
 
+    infer_lhs: ClassVar[InferLHS[Subscript]]
+
     def __init__(
         self,
-        ctx: Optional[Context] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        ctx: Context | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param ctx: Whether the subscripted item is assigned to or loaded from.
@@ -3901,13 +3968,13 @@ class Subscript(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None
+        self.value: NodeNG | None = None
         """What is being indexed."""
 
-        self.slice: Optional[NodeNG] = None
+        self.slice: NodeNG | None = None
         """The slice being used to lookup."""
 
-        self.ctx: Optional[Context] = ctx
+        self.ctx: Context | None = ctx
         """Whether the subscripted item is assigned to or loaded from."""
 
         super().__init__(
@@ -3920,7 +3987,7 @@ class Subscript(NodeNG):
 
     # pylint: disable=redefined-builtin; had to use the same name as builtin ast module.
     def postinit(
-        self, value: Optional[NodeNG] = None, slice: Optional[NodeNG] = None
+        self, value: NodeNG | None = None, slice: NodeNG | None = None
     ) -> None:
         """Do some setup after initialisation.
 
@@ -3936,7 +4003,7 @@ class Subscript(NodeNG):
         yield self.slice
 
 
-class TryExcept(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
+class TryExcept(_base_nodes.MultiLineWithElseBlockNode, _base_nodes.Statement):
     """Class representing an :class:`ast.TryExcept` node.
 
     >>> import astroid
@@ -3955,12 +4022,12 @@ class TryExcept(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -3975,13 +4042,13 @@ class TryExcept(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the block to catch exceptions from."""
 
-        self.handlers: typing.List[ExceptHandler] = []
+        self.handlers: list[ExceptHandler] = []
         """The exception handlers."""
 
-        self.orelse: typing.List[NodeNG] = []
+        self.orelse: list[NodeNG] = []
         """The contents of the ``else`` block."""
 
         super().__init__(
@@ -3994,9 +4061,9 @@ class TryExcept(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def postinit(
         self,
-        body: Optional[typing.List[NodeNG]] = None,
-        handlers: Optional[typing.List[ExceptHandler]] = None,
-        orelse: Optional[typing.List[NodeNG]] = None,
+        body: list[NodeNG] | None = None,
+        handlers: list[ExceptHandler] | None = None,
+        orelse: list[NodeNG] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -4043,7 +4110,7 @@ class TryExcept(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         yield from self.orelse or ()
 
 
-class TryFinally(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
+class TryFinally(_base_nodes.MultiLineWithElseBlockNode, _base_nodes.Statement):
     """Class representing an :class:`ast.TryFinally` node.
 
     >>> import astroid
@@ -4064,12 +4131,12 @@ class TryFinally(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4084,10 +4151,10 @@ class TryFinally(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.body: typing.Union[typing.List[TryExcept], typing.List[NodeNG]] = []
+        self.body: list[NodeNG | TryExcept] = []
         """The try-except that the finally is attached to."""
 
-        self.finalbody: typing.List[NodeNG] = []
+        self.finalbody: list[NodeNG] = []
         """The contents of the ``finally`` block."""
 
         super().__init__(
@@ -4100,8 +4167,8 @@ class TryFinally(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def postinit(
         self,
-        body: typing.Union[typing.List[TryExcept], typing.List[NodeNG], None] = None,
-        finalbody: Optional[typing.List[NodeNG]] = None,
+        body: list[NodeNG | TryExcept] | None = None,
+        finalbody: list[NodeNG] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -4152,13 +4219,13 @@ class Tuple(BaseContainer):
 
     def __init__(
         self,
-        ctx: Optional[Context] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        ctx: Context | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param ctx: Whether the tuple is assigned to or loaded from.
@@ -4175,7 +4242,7 @@ class Tuple(BaseContainer):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.ctx: Optional[Context] = ctx
+        self.ctx: Context | None = ctx
         """Whether the tuple is assigned to or loaded from."""
 
         super().__init__(
@@ -4186,20 +4253,22 @@ class Tuple(BaseContainer):
             parent=parent,
         )
 
-    assigned_stmts: AssignedStmtsCall["Tuple"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[Tuple]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
-    def pytype(self):
+    infer_unary_op: ClassVar[InferUnaryOp[Tuple]]
+    infer_binary_op: ClassVar[InferBinaryOp[Tuple]]
+
+    def pytype(self) -> Literal["builtins.tuple"]:
         """Get the name of the type that this node represents.
 
         :returns: The name of the type.
-        :rtype: str
         """
         return "builtins.tuple"
 
-    def getitem(self, index, context=None):
+    def getitem(self, index, context: InferenceContext | None = None):
         """Get an item from this node.
 
         :param index: The node to use as a subscript index.
@@ -4223,13 +4292,13 @@ class UnaryOp(NodeNG):
     @decorators.deprecate_default_argument_values(op="str")
     def __init__(
         self,
-        op: Optional[str] = None,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        op: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param op: The operator.
@@ -4246,10 +4315,10 @@ class UnaryOp(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.op: Optional[str] = op
+        self.op: str | None = op
         """The operator."""
 
-        self.operand: Optional[NodeNG] = None
+        self.operand: NodeNG | None = None
         """What the unary operator is applied to."""
 
         super().__init__(
@@ -4260,7 +4329,7 @@ class UnaryOp(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, operand: Optional[NodeNG] = None) -> None:
+    def postinit(self, operand: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param operand: What the unary operator is applied to.
@@ -4268,10 +4337,11 @@ class UnaryOp(NodeNG):
         self.operand = operand
 
     # This is set by inference.py
-    def _infer_unaryop(self, context=None):
-        raise NotImplementedError
+    _infer_unaryop: ClassVar[
+        InferBinaryOperation[UnaryOp, util.BadUnaryOperationMessage]
+    ]
 
-    def type_errors(self, context=None):
+    def type_errors(self, context: InferenceContext | None = None):
         """Get a list of type errors which can occur during inference.
 
         Each TypeError is represented by a :class:`BadBinaryOperationMessage`,
@@ -4300,7 +4370,7 @@ class UnaryOp(NodeNG):
         return super().op_precedence()
 
 
-class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
+class While(_base_nodes.MultiLineWithElseBlockNode, _base_nodes.Statement):
     """Class representing an :class:`ast.While` node.
 
     >>> import astroid
@@ -4317,12 +4387,12 @@ class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4337,13 +4407,13 @@ class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.test: Optional[NodeNG] = None
+        self.test: NodeNG | None = None
         """The condition that the loop tests."""
 
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the loop."""
 
-        self.orelse: typing.List[NodeNG] = []
+        self.orelse: list[NodeNG] = []
         """The contents of the ``else`` block."""
 
         super().__init__(
@@ -4356,9 +4426,9 @@ class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
     def postinit(
         self,
-        test: Optional[NodeNG] = None,
-        body: Optional[typing.List[NodeNG]] = None,
-        orelse: Optional[typing.List[NodeNG]] = None,
+        test: NodeNG | None = None,
+        body: list[NodeNG] | None = None,
+        orelse: list[NodeNG] | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -4374,7 +4444,7 @@ class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
         if orelse is not None:
             self.orelse = orelse
 
-    @decorators.cachedproperty
+    @cached_property
     def blockstart_tolineno(self):
         """The line on which the beginning of this block ends.
 
@@ -4407,10 +4477,9 @@ class While(mixins.MultiLineBlockMixin, mixins.BlockRangeMixIn, Statement):
 
 
 class With(
-    mixins.MultiLineBlockMixin,
-    mixins.BlockRangeMixIn,
-    mixins.AssignTypeMixin,
-    Statement,
+    _base_nodes.MultiLineWithElseBlockNode,
+    _base_nodes.AssignTypeNode,
+    _base_nodes.Statement,
 ):
     """Class representing an :class:`ast.With` node.
 
@@ -4429,12 +4498,12 @@ class With(
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4449,13 +4518,13 @@ class With(
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.items: typing.List[typing.Tuple[NodeNG, Optional[NodeNG]]] = []
+        self.items: list[tuple[NodeNG, NodeNG | None]] = []
         """The pairs of context managers and the names they are assigned to."""
 
-        self.body: typing.List[NodeNG] = []
+        self.body: list[NodeNG] = []
         """The contents of the ``with`` block."""
 
-        self.type_annotation: Optional[NodeNG] = None  # can be None
+        self.type_annotation: NodeNG | None = None  # can be None
         """If present, this will contain the type annotation passed by a type comment"""
 
         super().__init__(
@@ -4468,9 +4537,9 @@ class With(
 
     def postinit(
         self,
-        items: Optional[typing.List[typing.Tuple[NodeNG, Optional[NodeNG]]]] = None,
-        body: Optional[typing.List[NodeNG]] = None,
-        type_annotation: Optional[NodeNG] = None,
+        items: list[tuple[NodeNG, NodeNG | None]] | None = None,
+        body: list[NodeNG] | None = None,
+        type_annotation: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -4485,12 +4554,12 @@ class With(
             self.body = body
         self.type_annotation = type_annotation
 
-    assigned_stmts: AssignedStmtsCall["With"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[With]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
-    @decorators.cachedproperty
+    @cached_property
     def blockstart_tolineno(self):
         """The line on which the beginning of this block ends.
 
@@ -4528,12 +4597,12 @@ class Yield(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4548,7 +4617,7 @@ class Yield(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.value: Optional[NodeNG] = None  # can be None
+        self.value: NodeNG | None = None  # can be None
         """The value to yield."""
 
         super().__init__(
@@ -4559,7 +4628,7 @@ class Yield(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, value: Optional[NodeNG] = None) -> None:
+    def postinit(self, value: NodeNG | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: The value to yield.
@@ -4578,7 +4647,7 @@ class YieldFrom(Yield):  # TODO value is required, not optional
     """Class representing an :class:`ast.YieldFrom` node."""
 
 
-class DictUnpack(mixins.NoChildrenMixin, NodeNG):
+class DictUnpack(_base_nodes.NoChildrenNode):
     """Represents the unpacking of dicts into dicts using :pep:`448`."""
 
 
@@ -4600,12 +4669,12 @@ class FormattedValue(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4623,14 +4692,14 @@ class FormattedValue(NodeNG):
         self.value: NodeNG
         """The value to be formatted into the string."""
 
-        self.conversion: Optional[int] = None  # can be None
+        self.conversion: int | None = None  # can be None
         """The type of formatting to be applied to the value.
 
         .. seealso::
             :class:`ast.FormattedValue`
         """
 
-        self.format_spec: Optional[NodeNG] = None  # can be None
+        self.format_spec: NodeNG | None = None  # can be None
         """The formatting to be applied to the value.
 
         .. seealso::
@@ -4650,8 +4719,8 @@ class FormattedValue(NodeNG):
     def postinit(
         self,
         value: NodeNG,
-        conversion: Optional[int] = None,
-        format_spec: Optional[NodeNG] = None,
+        conversion: int | None = None,
+        format_spec: NodeNG | None = None,
     ) -> None:
         """Do some setup after initialisation.
 
@@ -4686,12 +4755,12 @@ class JoinedStr(NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4706,7 +4775,7 @@ class JoinedStr(NodeNG):
         :param end_col_offset: The end column this node appears on in the
             source code. Note: This is after the last symbol.
         """
-        self.values: typing.List[NodeNG] = []
+        self.values: list[NodeNG] = []
         """The string expressions to be joined.
 
         :type: list(FormattedValue or Const)
@@ -4720,7 +4789,7 @@ class JoinedStr(NodeNG):
             parent=parent,
         )
 
-    def postinit(self, values: Optional[typing.List[NodeNG]] = None) -> None:
+    def postinit(self, values: list[NodeNG] | None = None) -> None:
         """Do some setup after initialisation.
 
         :param value: The string expressions to be joined.
@@ -4734,7 +4803,7 @@ class JoinedStr(NodeNG):
         yield from self.values
 
 
-class NamedExpr(mixins.AssignTypeMixin, NodeNG):
+class NamedExpr(_base_nodes.AssignTypeNode):
     """Represents the assignment from the assignment expression
 
     >>> import astroid
@@ -4752,12 +4821,12 @@ class NamedExpr(mixins.AssignTypeMixin, NodeNG):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         """
         :param lineno: The line that this node appears on in the source code.
@@ -4793,14 +4862,14 @@ class NamedExpr(mixins.AssignTypeMixin, NodeNG):
         self.target = target
         self.value = value
 
-    assigned_stmts: AssignedStmtsCall["NamedExpr"]
+    assigned_stmts: ClassVar[AssignedStmtsCall[NamedExpr]]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
     def frame(
         self, *, future: Literal[None, True] = None
-    ) -> Union["nodes.FunctionDef", "nodes.Module", "nodes.ClassDef", "nodes.Lambda"]:
+    ) -> nodes.FunctionDef | nodes.Module | nodes.ClassDef | nodes.Lambda:
         """The first parent frame node.
 
         A frame node is a :class:`Module`, :class:`FunctionDef`,
@@ -4821,7 +4890,7 @@ class NamedExpr(mixins.AssignTypeMixin, NodeNG):
 
         return self.parent.frame(future=True)
 
-    def scope(self) -> "LocalsDictNodeNG":
+    def scope(self) -> LocalsDictNodeNG:
         """The first parent node defining a new scope.
         These can be Module, FunctionDef, ClassDef, Lambda, or GeneratorExp nodes.
 
@@ -4840,7 +4909,7 @@ class NamedExpr(mixins.AssignTypeMixin, NodeNG):
 
         return self.parent.scope()
 
-    def set_local(self, name: str, stmt: AssignName) -> None:
+    def set_local(self, name: str, stmt: NodeNG) -> None:
         """Define that the given name is declared in the given statement node.
         NamedExpr's in Arguments, Keyword or Comprehension are evaluated in their
         parent's parent scope. So we add to their frame's locals.
@@ -4854,7 +4923,7 @@ class NamedExpr(mixins.AssignTypeMixin, NodeNG):
         self.frame(future=True).set_local(name, stmt)
 
 
-class Unknown(mixins.AssignTypeMixin, NodeNG):
+class Unknown(_base_nodes.AssignTypeNode):
     """This node represents a node in a constructed AST where
     introspection is not possible.  At the moment, it's only used in
     the args attribute of FunctionDef nodes where function signature
@@ -4863,10 +4932,10 @@ class Unknown(mixins.AssignTypeMixin, NodeNG):
 
     name = "Unknown"
 
-    def qname(self):
+    def qname(self) -> Literal["Unknown"]:
         return "Unknown"
 
-    def _infer(self, context=None, **kwargs):
+    def _infer(self, context: InferenceContext | None = None, **kwargs):
         """Inference on an Unknown node immediately terminates."""
         yield util.Uninferable
 
@@ -4883,12 +4952,12 @@ class EvaluatedObject(NodeNG):
     _other_fields = ("value",)
 
     def __init__(
-        self, original: NodeNG, value: typing.Union[NodeNG, util.Uninferable]
+        self, original: NodeNG, value: NodeNG | type[util.Uninferable]
     ) -> None:
         self.original: NodeNG = original
         """The original node that has already been evaluated"""
 
-        self.value: typing.Union[NodeNG, util.Uninferable] = value
+        self.value: NodeNG | type[util.Uninferable] = value
         """The inferred value"""
 
         super().__init__(
@@ -4897,14 +4966,16 @@ class EvaluatedObject(NodeNG):
             parent=self.original.parent,
         )
 
-    def infer(self, context=None, **kwargs):
+    def _infer(
+        self, context: InferenceContext | None = None, **kwargs: Any
+    ) -> Generator[NodeNG | type[util.Uninferable], None, None]:
         yield self.value
 
 
 # Pattern matching #######################################################
 
 
-class Match(Statement):
+class Match(_base_nodes.Statement):
     """Class representing a :class:`ast.Match` node.
 
     >>> import astroid
@@ -4923,15 +4994,15 @@ class Match(Statement):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         self.subject: NodeNG
-        self.cases: typing.List["MatchCase"]
+        self.cases: list[MatchCase]
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -4944,7 +5015,7 @@ class Match(Statement):
         self,
         *,
         subject: NodeNG,
-        cases: typing.List["MatchCase"],
+        cases: list[MatchCase],
     ) -> None:
         self.subject = subject
         self.cases = cases
@@ -4954,7 +5025,7 @@ class Pattern(NodeNG):
     """Base class for all Pattern nodes."""
 
 
-class MatchCase(mixins.MultiLineBlockMixin, NodeNG):
+class MatchCase(_base_nodes.MultiLineBlockNode):
     """Class representing a :class:`ast.match_case` node.
 
     >>> import astroid
@@ -4975,18 +5046,18 @@ class MatchCase(mixins.MultiLineBlockMixin, NodeNG):
     end_lineno: None
     end_col_offset: None
 
-    def __init__(self, *, parent: Optional[NodeNG] = None) -> None:
+    def __init__(self, *, parent: NodeNG | None = None) -> None:
         self.pattern: Pattern
-        self.guard: Optional[NodeNG]
-        self.body: typing.List[NodeNG]
+        self.guard: NodeNG | None
+        self.body: list[NodeNG]
         super().__init__(parent=parent)
 
     def postinit(
         self,
         *,
         pattern: Pattern,
-        guard: Optional[NodeNG],
-        body: typing.List[NodeNG],
+        guard: NodeNG | None,
+        body: list[NodeNG],
     ) -> None:
         self.pattern = pattern
         self.guard = guard
@@ -5010,12 +5081,12 @@ class MatchValue(Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         self.value: NodeNG
         super().__init__(
@@ -5057,11 +5128,11 @@ class MatchSingleton(Pattern):
         self,
         *,
         value: Literal[True, False, None],
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
+        parent: NodeNG | None = None,
     ) -> None:
         self.value = value
         super().__init__(
@@ -5094,14 +5165,14 @@ class MatchSequence(Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
-        self.patterns: typing.List[Pattern]
+        self.patterns: list[Pattern]
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5110,11 +5181,11 @@ class MatchSequence(Pattern):
             parent=parent,
         )
 
-    def postinit(self, *, patterns: typing.List[Pattern]) -> None:
+    def postinit(self, *, patterns: list[Pattern]) -> None:
         self.patterns = patterns
 
 
-class MatchMapping(mixins.AssignTypeMixin, Pattern):
+class MatchMapping(_base_nodes.AssignTypeNode, Pattern):
     """Class representing a :class:`ast.MatchMapping` node.
 
     >>> import astroid
@@ -5131,16 +5202,16 @@ class MatchMapping(mixins.AssignTypeMixin, Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
-        self.keys: typing.List[NodeNG]
-        self.patterns: typing.List[Pattern]
-        self.rest: Optional[AssignName]
+        self.keys: list[NodeNG]
+        self.patterns: list[Pattern]
+        self.rest: AssignName | None
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5152,22 +5223,24 @@ class MatchMapping(mixins.AssignTypeMixin, Pattern):
     def postinit(
         self,
         *,
-        keys: typing.List[NodeNG],
-        patterns: typing.List[Pattern],
-        rest: Optional[AssignName],
+        keys: list[NodeNG],
+        patterns: list[Pattern],
+        rest: AssignName | None,
     ) -> None:
         self.keys = keys
         self.patterns = patterns
         self.rest = rest
 
-    assigned_stmts: Callable[
-        [
-            "MatchMapping",
-            AssignName,
-            Optional[InferenceContext],
-            Literal[None],
-        ],
-        Generator[NodeNG, None, None],
+    assigned_stmts: ClassVar[
+        Callable[
+            [
+                MatchMapping,
+                AssignName,
+                InferenceContext | None,
+                None,
+            ],
+            Generator[NodeNG, None, None],
+        ]
     ]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
@@ -5196,17 +5269,17 @@ class MatchClass(Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
         self.cls: NodeNG
-        self.patterns: typing.List[Pattern]
-        self.kwd_attrs: typing.List[str]
-        self.kwd_patterns: typing.List[Pattern]
+        self.patterns: list[Pattern]
+        self.kwd_attrs: list[str]
+        self.kwd_patterns: list[Pattern]
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5219,9 +5292,9 @@ class MatchClass(Pattern):
         self,
         *,
         cls: NodeNG,
-        patterns: typing.List[Pattern],
-        kwd_attrs: typing.List[str],
-        kwd_patterns: typing.List[Pattern],
+        patterns: list[Pattern],
+        kwd_attrs: list[str],
+        kwd_patterns: list[Pattern],
     ) -> None:
         self.cls = cls
         self.patterns = patterns
@@ -5229,7 +5302,7 @@ class MatchClass(Pattern):
         self.kwd_patterns = kwd_patterns
 
 
-class MatchStar(mixins.AssignTypeMixin, Pattern):
+class MatchStar(_base_nodes.AssignTypeNode, Pattern):
     """Class representing a :class:`ast.MatchStar` node.
 
     >>> import astroid
@@ -5246,14 +5319,14 @@ class MatchStar(mixins.AssignTypeMixin, Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
-        self.name: Optional[AssignName]
+        self.name: AssignName | None
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5262,24 +5335,26 @@ class MatchStar(mixins.AssignTypeMixin, Pattern):
             parent=parent,
         )
 
-    def postinit(self, *, name: Optional[AssignName]) -> None:
+    def postinit(self, *, name: AssignName | None) -> None:
         self.name = name
 
-    assigned_stmts: Callable[
-        [
-            "MatchStar",
-            AssignName,
-            Optional[InferenceContext],
-            Literal[None],
-        ],
-        Generator[NodeNG, None, None],
+    assigned_stmts: ClassVar[
+        Callable[
+            [
+                MatchStar,
+                AssignName,
+                InferenceContext | None,
+                None,
+            ],
+            Generator[NodeNG, None, None],
+        ]
     ]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
     """
 
 
-class MatchAs(mixins.AssignTypeMixin, Pattern):
+class MatchAs(_base_nodes.AssignTypeNode, Pattern):
     """Class representing a :class:`ast.MatchAs` node.
 
     >>> import astroid
@@ -5308,15 +5383,15 @@ class MatchAs(mixins.AssignTypeMixin, Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
-        self.pattern: Optional[Pattern]
-        self.name: Optional[AssignName]
+        self.pattern: Pattern | None
+        self.name: AssignName | None
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5328,20 +5403,22 @@ class MatchAs(mixins.AssignTypeMixin, Pattern):
     def postinit(
         self,
         *,
-        pattern: Optional[Pattern],
-        name: Optional[AssignName],
+        pattern: Pattern | None,
+        name: AssignName | None,
     ) -> None:
         self.pattern = pattern
         self.name = name
 
-    assigned_stmts: Callable[
-        [
-            "MatchAs",
-            AssignName,
-            Optional[InferenceContext],
-            Literal[None],
-        ],
-        Generator[NodeNG, None, None],
+    assigned_stmts: ClassVar[
+        Callable[
+            [
+                MatchAs,
+                AssignName,
+                InferenceContext | None,
+                None,
+            ],
+            Generator[NodeNG, None, None],
+        ]
     ]
     """Returns the assigned statement (non inferred) according to the assignment type.
     See astroid/protocols.py for actual implementation.
@@ -5365,14 +5442,14 @@ class MatchOr(Pattern):
 
     def __init__(
         self,
-        lineno: Optional[int] = None,
-        col_offset: Optional[int] = None,
-        parent: Optional[NodeNG] = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        parent: NodeNG | None = None,
         *,
-        end_lineno: Optional[int] = None,
-        end_col_offset: Optional[int] = None,
+        end_lineno: int | None = None,
+        end_col_offset: int | None = None,
     ) -> None:
-        self.patterns: typing.List[Pattern]
+        self.patterns: list[Pattern]
         super().__init__(
             lineno=lineno,
             col_offset=col_offset,
@@ -5381,13 +5458,15 @@ class MatchOr(Pattern):
             parent=parent,
         )
 
-    def postinit(self, *, patterns: typing.List[Pattern]) -> None:
+    def postinit(self, *, patterns: list[Pattern]) -> None:
         self.patterns = patterns
 
 
 # constants ##############################################################
 
-CONST_CLS = {
+# The _proxied attribute of all container types (List, Tuple, etc.)
+# are set during bootstrapping by _astroid_bootstrapping().
+CONST_CLS: dict[type, type[NodeNG]] = {
     list: List,
     tuple: Tuple,
     dict: Dict,
@@ -5395,63 +5474,61 @@ CONST_CLS = {
     type(None): Const,
     type(NotImplemented): Const,
     type(...): Const,
+    bool: Const,
+    int: Const,
+    float: Const,
+    complex: Const,
+    str: Const,
+    bytes: Const,
 }
 
 
-def _update_const_classes():
-    """update constant classes, so the keys of CONST_CLS can be reused"""
-    klasses = (bool, int, float, complex, str, bytes)
-    for kls in klasses:
-        CONST_CLS[kls] = Const
+def _create_basic_elements(
+    value: Iterable[Any], node: List | Set | Tuple
+) -> list[NodeNG]:
+    """Create a list of nodes to function as the elements of a new node."""
+    elements: list[NodeNG] = []
+    for element in value:
+        element_node = const_factory(element)
+        element_node.parent = node
+        elements.append(element_node)
+    return elements
 
 
-_update_const_classes()
+def _create_dict_items(
+    values: Mapping[Any, Any], node: Dict
+) -> list[tuple[SuccessfulInferenceResult, SuccessfulInferenceResult]]:
+    """Create a list of node pairs to function as the items of a new dict node."""
+    elements: list[tuple[SuccessfulInferenceResult, SuccessfulInferenceResult]] = []
+    for key, value in values.items():
+        key_node = const_factory(key)
+        key_node.parent = node
+        value_node = const_factory(value)
+        value_node.parent = node
+        elements.append((key_node, value_node))
+    return elements
 
 
-def _two_step_initialization(cls, value):
-    instance = cls()
-    instance.postinit(value)
-    return instance
-
-
-def _dict_initialization(cls, value):
-    if isinstance(value, dict):
-        value = tuple(value.items())
-    return _two_step_initialization(cls, value)
-
-
-_CONST_CLS_CONSTRUCTORS = {
-    List: _two_step_initialization,
-    Tuple: _two_step_initialization,
-    Dict: _dict_initialization,
-    Set: _two_step_initialization,
-    Const: lambda cls, value: cls(value),
-}
-
-
-def const_factory(value):
-    """return an astroid node for a python value"""
-    # XXX we should probably be stricter here and only consider stuff in
-    # CONST_CLS or do better treatment: in case where value is not in CONST_CLS,
-    # we should rather recall the builder on this value than returning an empty
-    # node (another option being that const_factory shouldn't be called with something
-    # not in CONST_CLS)
+def const_factory(value: Any) -> ConstFactoryResult:
+    """Return an astroid node for a python value."""
     assert not isinstance(value, NodeNG)
 
-    # Hack for ignoring elements of a sequence
-    # or a mapping, in order to avoid transforming
-    # each element to an AST. This is fixed in 2.0
-    # and this approach is a temporary hack.
-    if isinstance(value, (list, set, tuple, dict)):
-        elts = []
-    else:
-        elts = value
-
-    try:
-        initializer_cls = CONST_CLS[value.__class__]
-        initializer = _CONST_CLS_CONSTRUCTORS[initializer_cls]
-        return initializer(initializer_cls, elts)
-    except (KeyError, AttributeError):
+    # This only handles instances of the CONST types. Any
+    # subclasses get inferred as EmptyNode.
+    # TODO: See if we should revisit these with the normal builder.
+    if value.__class__ not in CONST_CLS:
         node = EmptyNode()
         node.object = value
         return node
+
+    instance: List | Set | Tuple | Dict
+    initializer_cls = CONST_CLS[value.__class__]
+    if issubclass(initializer_cls, (List, Set, Tuple)):
+        instance = initializer_cls()
+        instance.postinit(_create_basic_elements(value, instance))
+        return instance
+    if issubclass(initializer_cls, Dict):
+        instance = initializer_cls()
+        instance.postinit(_create_dict_items(value, instance))
+        return instance
+    return Const(value)
