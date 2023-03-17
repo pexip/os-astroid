@@ -1,5 +1,7 @@
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
+
 """
 Astroid hook for the attrs library
 
@@ -10,7 +12,9 @@ from astroid.manager import AstroidManager
 from astroid.nodes.node_classes import AnnAssign, Assign, AssignName, Call, Unknown
 from astroid.nodes.scoped_nodes import ClassDef
 
-ATTRIB_NAMES = frozenset(("attr.ib", "attrib", "attr.attrib", "attr.field", "field"))
+ATTRIB_NAMES = frozenset(
+    ("attr.ib", "attrib", "attr.attrib", "attr.field", "attrs.field", "field")
+)
 ATTRS_NAMES = frozenset(
     (
         "attr.s",
@@ -20,13 +24,15 @@ ATTRS_NAMES = frozenset(
         "attr.define",
         "attr.mutable",
         "attr.frozen",
+        "attrs.define",
+        "attrs.mutable",
+        "attrs.frozen",
     )
 )
 
 
-def is_decorated_with_attrs(node, decorator_names=ATTRS_NAMES):
-    """Return True if a decorated node has
-    an attr decorator applied."""
+def is_decorated_with_attrs(node, decorator_names=ATTRS_NAMES) -> bool:
+    """Return whether a decorated node has an attr decorator applied."""
     if not node.decorators:
         return False
     for decorator_attribute in node.decorators.nodes:

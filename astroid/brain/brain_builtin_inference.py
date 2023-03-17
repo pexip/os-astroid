@@ -1,30 +1,18 @@
-# Copyright (c) 2014-2021 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014-2015 LOGILAB S.A. (Paris, FRANCE) <contact@logilab.fr>
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2015 Rene Zhang <rz99@cornell.edu>
-# Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
-# Copyright (c) 2018 Ville Skyttä <ville.skytta@iki.fi>
-# Copyright (c) 2019-2020 Bryce Guinta <bryce.guinta@protonmail.com>
-# Copyright (c) 2019 Stanislav Levin <slev@altlinux.org>
-# Copyright (c) 2019 David Liu <david@cs.toronto.edu>
-# Copyright (c) 2019 Frédéric Chapoton <fchapoton2@gmail.com>
-# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2020 Ram Rachum <ram@rachum.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Daniël van Noord <13665637+DanielNoord@users.noreply.github.com>
-# Copyright (c) 2021 Nick Drozd <nicholasdrozd@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
-
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
 """Astroid hooks for various builtins."""
 
+from __future__ import annotations
+
+import itertools
+from collections.abc import Iterator
 from functools import partial
 
 from astroid import arguments, helpers, inference_tip, nodes, objects, util
 from astroid.builder import AstroidBuilder
+from astroid.context import InferenceContext
 from astroid.exceptions import (
     AstroidTypeError,
     AttributeInferenceError,
@@ -120,7 +108,7 @@ class whatever(object):
 
 
 def _extend_string_class(class_node, code, rvalue):
-    """function to extend builtin str/unicode class"""
+    """Function to extend builtin str/unicode class."""
     code = code.format(rvalue=rvalue)
     fake = AstroidBuilder(AstroidManager()).string_build(code)["whatever"]
     for method in fake.mymethods():
@@ -147,7 +135,7 @@ _extend_builtins(
 )
 
 
-def _builtin_filter_predicate(node, builtin_name):
+def _builtin_filter_predicate(node, builtin_name) -> bool:
     if (
         builtin_name == "type"
         and node.root().name == "re"
@@ -176,14 +164,14 @@ def _builtin_filter_predicate(node, builtin_name):
     return False
 
 
-def register_builtin_transform(transform, builtin_name):
+def register_builtin_transform(transform, builtin_name) -> None:
     """Register a new transform function for the given *builtin_name*.
 
     The transform function must accept two parameters, a node and
     an optional context.
     """
 
-    def _transform_wrapper(node, context=None):
+    def _transform_wrapper(node, context: InferenceContext | None = None):
         result = transform(node, context=context)
         if result:
             if not result.parent:
@@ -348,7 +336,7 @@ def _get_elts(arg, context):
     return items
 
 
-def infer_dict(node, context=None):
+def infer_dict(node, context: InferenceContext | None = None):
     """Try to infer a dict call to a Dict node.
 
     The function treats the following cases:
@@ -391,7 +379,7 @@ def infer_dict(node, context=None):
     return value
 
 
-def infer_super(node, context=None):
+def infer_super(node, context: InferenceContext | None = None):
     """Understand super calls.
 
     There are some restrictions for what can be understood:
@@ -470,8 +458,8 @@ def _infer_getattr_args(node, context):
     return obj, attr.value
 
 
-def infer_getattr(node, context=None):
-    """Understand getattr calls
+def infer_getattr(node, context: InferenceContext | None = None):
+    """Understand getattr calls.
 
     If one of the arguments is an Uninferable object, then the
     result will be an Uninferable object. Otherwise, the normal attribute
@@ -498,8 +486,8 @@ def infer_getattr(node, context=None):
     raise UseInferenceDefault
 
 
-def infer_hasattr(node, context=None):
-    """Understand hasattr calls
+def infer_hasattr(node, context: InferenceContext | None = None):
+    """Understand hasattr calls.
 
     This always guarantees three possible outcomes for calling
     hasattr: Const(False) when we are sure that the object
@@ -525,8 +513,8 @@ def infer_hasattr(node, context=None):
     return nodes.Const(True)
 
 
-def infer_callable(node, context=None):
-    """Understand callable calls
+def infer_callable(node, context: InferenceContext | None = None):
+    """Understand callable calls.
 
     This follows Python's semantics, where an object
     is callable if it provides an attribute __call__,
@@ -547,8 +535,10 @@ def infer_callable(node, context=None):
     return nodes.Const(inferred.callable())
 
 
-def infer_property(node, context=None):
-    """Understand `property` class
+def infer_property(
+    node: nodes.Call, context: InferenceContext | None = None
+) -> objects.Property:
+    """Understand `property` class.
 
     This only infers the output of `property`
     call, not the arguments themselves.
@@ -566,17 +556,22 @@ def infer_property(node, context=None):
     if not isinstance(inferred, (nodes.FunctionDef, nodes.Lambda)):
         raise UseInferenceDefault
 
-    return objects.Property(
+    prop_func = objects.Property(
         function=inferred,
         name=inferred.name,
-        doc=getattr(inferred, "doc", None),
         lineno=node.lineno,
         parent=node,
         col_offset=node.col_offset,
     )
+    prop_func.postinit(
+        body=[],
+        args=inferred.args,
+        doc_node=getattr(inferred, "doc_node", None),
+    )
+    return prop_func
 
 
-def infer_bool(node, context=None):
+def infer_bool(node, context: InferenceContext | None = None):
     """Understand bool calls."""
     if len(node.args) > 1:
         # Invalid bool call.
@@ -599,7 +594,7 @@ def infer_bool(node, context=None):
     return nodes.Const(bool_value)
 
 
-def infer_type(node, context=None):
+def infer_type(node, context: InferenceContext | None = None):
     """Understand the one-argument form of *type*."""
     if len(node.args) != 1:
         raise UseInferenceDefault
@@ -607,7 +602,7 @@ def infer_type(node, context=None):
     return helpers.object_type(node.args[0], context)
 
 
-def infer_slice(node, context=None):
+def infer_slice(node, context: InferenceContext | None = None):
     """Understand `slice` calls."""
     args = node.args
     if not 0 < len(args) <= 3:
@@ -634,14 +629,14 @@ def infer_slice(node, context=None):
     return slice_node
 
 
-def _infer_object__new__decorator(node, context=None):
+def _infer_object__new__decorator(node, context: InferenceContext | None = None):
     # Instantiate class immediately
     # since that's what @object.__new__ does
     return iter((node.instantiate_class(),))
 
 
-def _infer_object__new__decorator_check(node):
-    """Predicate before inference_tip
+def _infer_object__new__decorator_check(node) -> bool:
+    """Predicate before inference_tip.
 
     Check if the given ClassDef has an @object.__new__ decorator
     """
@@ -655,8 +650,8 @@ def _infer_object__new__decorator_check(node):
     return False
 
 
-def infer_issubclass(callnode, context=None):
-    """Infer issubclass() calls
+def infer_issubclass(callnode, context: InferenceContext | None = None):
+    """Infer issubclass() calls.
 
     :param nodes.Call callnode: an `issubclass` call
     :param InferenceContext context: the context for the inference
@@ -698,12 +693,10 @@ def infer_issubclass(callnode, context=None):
     return nodes.Const(issubclass_bool)
 
 
-def infer_isinstance(callnode, context=None):
-    """Infer isinstance calls
+def infer_isinstance(callnode, context: InferenceContext | None = None):
+    """Infer isinstance calls.
 
     :param nodes.Call callnode: an isinstance call
-    :param InferenceContext context: context for call
-        (currently unused but is a common interface for inference)
     :rtype nodes.Const: Boolean Const value of isinstance call
 
     :raises UseInferenceDefault: If the node cannot be inferred
@@ -737,7 +730,7 @@ def infer_isinstance(callnode, context=None):
     return nodes.Const(isinstance_bool)
 
 
-def _class_or_tuple_to_container(node, context=None):
+def _class_or_tuple_to_container(node, context: InferenceContext | None = None):
     # Move inferences results into container
     # to simplify later logic
     # raises InferenceError if any of the inferences fall through
@@ -762,8 +755,8 @@ def _class_or_tuple_to_container(node, context=None):
     return class_container
 
 
-def infer_len(node, context=None):
-    """Infer length calls
+def infer_len(node, context: InferenceContext | None = None):
+    """Infer length calls.
 
     :param nodes.Call node: len call to infer
     :param context.InferenceContext: node context
@@ -785,8 +778,8 @@ def infer_len(node, context=None):
         raise UseInferenceDefault(str(exc)) from exc
 
 
-def infer_str(node, context=None):
-    """Infer str() calls
+def infer_str(node, context: InferenceContext | None = None):
+    """Infer str() calls.
 
     :param nodes.Call node: str() call to infer
     :param context.InferenceContext: node context
@@ -801,8 +794,8 @@ def infer_str(node, context=None):
         raise UseInferenceDefault(str(exc)) from exc
 
 
-def infer_int(node, context=None):
-    """Infer int() calls
+def infer_int(node, context: InferenceContext | None = None):
+    """Infer int() calls.
 
     :param nodes.Call node: int() call to infer
     :param context.InferenceContext: node context
@@ -833,8 +826,8 @@ def infer_int(node, context=None):
     return nodes.Const(0)
 
 
-def infer_dict_fromkeys(node, context=None):
-    """Infer dict.fromkeys
+def infer_dict_fromkeys(node, context: InferenceContext | None = None):
+    """Infer dict.fromkeys.
 
     :param nodes.Call node: dict.fromkeys() call to infer
     :param context.InferenceContext context: node context
@@ -900,6 +893,77 @@ def infer_dict_fromkeys(node, context=None):
     return _build_dict_with_elements([])
 
 
+def _infer_copy_method(
+    node: nodes.Call, context: InferenceContext | None = None
+) -> Iterator[nodes.NodeNG]:
+    assert isinstance(node.func, nodes.Attribute)
+    inferred_orig, inferred_copy = itertools.tee(node.func.expr.infer(context=context))
+    if all(
+        isinstance(
+            inferred_node, (nodes.Dict, nodes.List, nodes.Set, objects.FrozenSet)
+        )
+        for inferred_node in inferred_orig
+    ):
+        return inferred_copy
+
+    raise UseInferenceDefault()
+
+
+def _is_str_format_call(node: nodes.Call) -> bool:
+    """Catch calls to str.format()."""
+    if not isinstance(node.func, nodes.Attribute) or not node.func.attrname == "format":
+        return False
+
+    if isinstance(node.func.expr, nodes.Name):
+        value = helpers.safe_infer(node.func.expr)
+    else:
+        value = node.func.expr
+
+    return isinstance(value, nodes.Const) and isinstance(value.value, str)
+
+
+def _infer_str_format_call(
+    node: nodes.Call, context: InferenceContext | None = None
+) -> Iterator[nodes.Const | type[util.Uninferable]]:
+    """Return a Const node based on the template and passed arguments."""
+    call = arguments.CallSite.from_call(node, context=context)
+    if isinstance(node.func.expr, nodes.Name):
+        value: nodes.Const | None = helpers.safe_infer(node.func.expr)
+        if value is None:
+            return iter([util.Uninferable])
+    else:
+        value = node.func.expr
+
+    format_template = value.value
+
+    # Get the positional arguments passed
+    inferred_positional = [
+        helpers.safe_infer(i, context) for i in call.positional_arguments
+    ]
+    if not all(isinstance(i, nodes.Const) for i in inferred_positional):
+        return iter([util.Uninferable])
+    pos_values: list[str] = [i.value for i in inferred_positional]
+
+    # Get the keyword arguments passed
+    inferred_keyword = {
+        k: helpers.safe_infer(v, context) for k, v in call.keyword_arguments.items()
+    }
+    if not all(isinstance(i, nodes.Const) for i in inferred_keyword.values()):
+        return iter([util.Uninferable])
+    keyword_values: dict[str, str] = {k: v.value for k, v in inferred_keyword.items()}
+
+    try:
+        formatted_string = format_template.format(*pos_values, **keyword_values)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        # AttributeError: named field in format string was not found in the arguments
+        # IndexError: there are too few arguments to interpolate
+        # TypeError: Unsupported format string
+        # ValueError: Unknown format code
+        return iter([util.Uninferable])
+
+    return iter([nodes.const_factory(formatted_string)])
+
+
 # Builtins inference
 register_builtin_transform(infer_bool, "bool")
 register_builtin_transform(infer_super, "super")
@@ -927,4 +991,15 @@ AstroidManager().register_transform(
     nodes.ClassDef,
     inference_tip(_infer_object__new__decorator),
     _infer_object__new__decorator_check,
+)
+
+AstroidManager().register_transform(
+    nodes.Call,
+    inference_tip(_infer_copy_method),
+    lambda node: isinstance(node.func, nodes.Attribute)
+    and node.func.attrname == "copy",
+)
+
+AstroidManager().register_transform(
+    nodes.Call, inference_tip(_infer_str_format_call), _is_str_format_call
 )

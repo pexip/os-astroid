@@ -1,24 +1,30 @@
-# Copyright (c) 2013 AndroWiiid <androwiiid@gmail.com>
-# Copyright (c) 2014-2016, 2018-2020 Claudiu Popa <pcmanticore@gmail.com>
-# Copyright (c) 2014 Google, Inc.
-# Copyright (c) 2015-2016 Ceridwen <ceridwenv@gmail.com>
-# Copyright (c) 2018 Anthony Sottile <asottile@umich.edu>
-# Copyright (c) 2018 Bryce Guinta <bryce.paul.guinta@gmail.com>
-# Copyright (c) 2019 Ashley Whetter <ashley@awhetter.co.uk>
-# Copyright (c) 2020-2021 hippo91 <guillaume.peillex@gmail.com>
-# Copyright (c) 2020 David Gilman <davidgilman1@gmail.com>
-# Copyright (c) 2021 Pierre Sassoulas <pierre.sassoulas@gmail.com>
-# Copyright (c) 2021 Marc Mueller <30130371+cdce8p@users.noreply.github.com>
+"""
+'tests.testdata.python3.data.fake_module_with_warnings' and
+'tests.testdata.python3.data.fake_module_with_warnings' are fake modules
+to simulate issues in unittest below
+"""
 
 # Licensed under the LGPL: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
 # For details: https://github.com/PyCQA/astroid/blob/main/LICENSE
+# Copyright (c) https://github.com/PyCQA/astroid/blob/main/CONTRIBUTORS.txt
 
-import platform
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import types
 import unittest
+from typing import Any
+from unittest import mock
 
 import _io
+import pytest
 
+import tests.testdata.python3.data.fake_module_with_broken_getattr as fm_getattr
+import tests.testdata.python3.data.fake_module_with_warnings as fm
 from astroid.builder import AstroidBuilder
+from astroid.const import IS_PYPY
 from astroid.raw_building import (
     attach_dummy_node,
     build_class,
@@ -44,12 +50,18 @@ class RawBuildingTC(unittest.TestCase):
     def test_build_class(self) -> None:
         node = build_class("MyClass")
         self.assertEqual(node.name, "MyClass")
-        self.assertEqual(node.doc, None)
+        with pytest.warns(DeprecationWarning) as records:
+            self.assertEqual(node.doc, None)
+            assert len(records) == 1
+        self.assertEqual(node.doc_node, None)
 
     def test_build_function(self) -> None:
         node = build_function("MyFunction")
         self.assertEqual(node.name, "MyFunction")
-        self.assertEqual(node.doc, None)
+        with pytest.warns(DeprecationWarning) as records:
+            self.assertEqual(node.doc, None)
+            assert len(records) == 1
+        self.assertEqual(node.doc_node, None)
 
     def test_build_function_args(self) -> None:
         args = ["myArgs1", "myArgs2"]
@@ -78,7 +90,7 @@ class RawBuildingTC(unittest.TestCase):
         node = build_from_import("astroid", names)
         self.assertEqual(len(names), len(node.names))
 
-    @unittest.skipIf(platform.python_implementation() == "PyPy", "Only affects CPython")
+    @unittest.skipIf(IS_PYPY, "Only affects CPython")
     def test_io_is__io(self):
         # _io module calls itself io. This leads
         # to cyclic dependencies when astroid tries to resolve
@@ -89,6 +101,67 @@ class RawBuildingTC(unittest.TestCase):
         module = builder.inspect_build(_io)
         buffered_reader = module.getattr("BufferedReader")[0]
         self.assertEqual(buffered_reader.root().name, "io")
+
+    def test_build_function_deepinspect_deprecation(self) -> None:
+        # Tests https://github.com/PyCQA/astroid/issues/1717
+        # When astroid deep inspection of modules raises
+        # attribute errors when getting all attributes
+        # Create a mock module to simulate a Cython module
+        m = types.ModuleType("test")
+
+        # Attach a mock of pandas with the same behavior
+        m.pd = fm
+
+        # This should not raise an exception
+        AstroidBuilder().module_build(m, "test")
+
+    def test_module_object_with_broken_getattr(self) -> None:
+        # Tests https://github.com/PyCQA/astroid/issues/1958
+        # When astroid deep inspection of modules raises
+        # errors when using hasattr().
+
+        # This should not raise an exception
+        AstroidBuilder().inspect_build(fm_getattr, "test")
+
+
+@pytest.mark.skipif(
+    "posix" not in sys.builtin_module_names, reason="Platform doesn't support posix"
+)
+def test_build_module_getattr_catch_output(
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Catch stdout and stderr in module __getattr__ calls when building a module.
+
+    Usually raised by DeprecationWarning or FutureWarning.
+    """
+    caplog.set_level(logging.INFO)
+    original_sys = sys.modules
+    original_module = sys.modules["posix"]
+    expected_out = "INFO (TEST): Welcome to posix!"
+    expected_err = "WARNING (TEST): Monkey-patched version of posix - module getattr"
+
+    class CustomGetattr:
+        def __getattr__(self, name: str) -> Any:
+            print(f"{expected_out}")
+            print(expected_err, file=sys.stderr)
+            return getattr(original_module, name)
+
+    def mocked_sys_modules_getitem(name: str) -> types.ModuleType | CustomGetattr:
+        if name != "posix":
+            return original_sys[name]
+        return CustomGetattr()
+
+    with mock.patch("astroid.raw_building.sys.modules") as sys_mock:
+        sys_mock.__getitem__.side_effect = mocked_sys_modules_getitem
+        builder = AstroidBuilder()
+        builder.inspect_build(os)
+
+    out, err = capsys.readouterr()
+    assert expected_out in caplog.text
+    assert expected_err in caplog.text
+    assert not out
+    assert not err
 
 
 if __name__ == "__main__":
