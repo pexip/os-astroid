@@ -1,3 +1,9 @@
+astroid (2.14.2-1pexip1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Huw Jones <huw@pexip.com>  Fri, 17 Mar 2023 11:04:51 +0000
+
 astroid (2.14.2-1) unstable; urgency=medium
 
   * New upstream release
